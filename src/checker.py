@@ -145,7 +145,7 @@ def handler(event, context):
     start = time.time()
     status_code, error = _consultar(host, path, ip)
     item = {
-        "url": url,
+        "url": f"https://{host}{path}",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "status_code": status_code,
         "error": error,
