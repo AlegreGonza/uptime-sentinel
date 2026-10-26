@@ -6,6 +6,7 @@ from rich.console import Console
 from rich.table import Table
 
 VERSION = "1.0.0"
+AYUDA_URL = "URL completa, con https://"
 API_URL = os.environ.get("UPTIME_API_URL", "")
 API_KEY = os.environ.get("UPTIME_API_KEY", "")
 
@@ -55,7 +56,7 @@ def _datos(status, cuerpo):
 
 
 @app.command(help="Revisa una URL sin guardarla")
-def probar(url: str = typer.Argument(..., help="URL completa, con https://")):
+def probar(url: str = typer.Argument(..., help=AYUDA_URL)):
     datos = _datos(*_pedir("POST", "/probar", {"url": url}))
     tabla = Table(title="Resultado", show_header=False)
     for clave, valor in datos.items():
@@ -64,7 +65,7 @@ def probar(url: str = typer.Argument(..., help="URL completa, con https://")):
 
 
 @app.command(help="Guarda una URL para monitorearla cada 5 minutos")
-def guardar(url: str = typer.Argument(..., help="URL completa, con https://")):
+def guardar(url: str = typer.Argument(..., help=AYUDA_URL)):
     datos = _datos(*_pedir("POST", "/objetivos", {"url": url}))
     tabla = Table(title="Objetivo guardado", show_header=False)
     for clave, valor in datos.items():
@@ -82,7 +83,7 @@ def listar():
 
 
 @app.command(help="Muestra el historial de una URL")
-def resultados(url: str = typer.Argument(..., help="URL completa, con https://")):
+def resultados(url: str = typer.Argument(..., help=AYUDA_URL)):
     datos = _datos(*_pedir("GET", "/resultados", params={"url": url}))
     tabla = Table("Fecha", "Status", "ms", "Error")
     for resultado in datos["resultados"]:
