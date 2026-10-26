@@ -1,4 +1,4 @@
-# Terraform
+﻿# Terraform
 .terraform/
 *.tfstate
 *.tfstate.*
@@ -17,4 +17,5 @@ __pycache__/
 # Secretos y entorno local
 .env
 .env.*
-checker.zip
+tfplan
+*.zip

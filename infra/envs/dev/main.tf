@@ -48,18 +48,6 @@ resource "aws_iam_role_policy_attachment" "logs" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-resource "aws_iam_role_policy" "write_table" {
-  role = aws_iam_role.checker.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = "dynamodb:PutItem"
-      Resource = aws_dynamodb_table.checks.arn
-    }]
-  })
-}
-
 data "archive_file" "checker" {
   type        = "zip"
   source_file = "${path.module}/../../../src/checker.py"
@@ -74,10 +62,4 @@ resource "aws_lambda_function" "checker" {
   filename         = data.archive_file.checker.output_path
   source_code_hash = data.archive_file.checker.output_base64sha256
   timeout          = 15
-
-  environment {
-    variables = {
-      TABLE_NAME = aws_dynamodb_table.checks.name
-    }
-  }
 }
