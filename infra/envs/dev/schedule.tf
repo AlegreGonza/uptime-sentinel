@@ -1,7 +1,7 @@
 resource "aws_cloudwatch_event_rule" "monitor_schedule" {
   name                = "uptime-monitor-schedule-dev"
   schedule_expression = "rate(5 minutes)"
-  state               = "DISABLED"
+  state               = "ENABLED"
 }
 
 resource "aws_cloudwatch_event_target" "monitor" {

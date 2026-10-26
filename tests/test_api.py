@@ -1,6 +1,7 @@
 import io
 import json
 import os
+from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
@@ -254,6 +255,24 @@ def test_resultados_dynamodb_error_returns_500(mocks):
     resultados.query.side_effect = _cliente_error("ResourceNotFoundException")
     r = api.handler(_evento("/resultados", "GET", query={"url": "https://example.com/"}), None)
     assert r["statusCode"] == 500
+
+
+def test_resultados_con_decimal_de_dynamodb_no_falla(mocks):
+    _, _, resultados = mocks
+    resultados.query.return_value = {
+        "Items": [
+            {
+                "url": "https://example.com/",
+                "timestamp": "t",
+                "status_code": Decimal("200"),
+                "elapsed_ms": Decimal("373"),
+                "error": None,
+            }
+        ]
+    }
+    r = api.handler(_evento("/resultados", "GET", query={"url": "https://example.com/"}), None)
+    assert r["statusCode"] == 200
+    assert json.loads(r["body"])["resultados"][0]["status_code"] == 200
 
 
 @pytest.mark.parametrize(

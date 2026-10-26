@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -29,11 +30,17 @@ class ErrorCliente(Exception):
         self.cuerpo = cuerpo
 
 
+def _a_json(valor):
+    if isinstance(valor, Decimal):
+        return int(valor) if valor == valor.to_integral_value() else float(valor)
+    raise TypeError(f"Tipo no serializable: {type(valor)}")
+
+
 def _respuesta(status, cuerpo):
     return {
         "statusCode": status,
         "headers": HEADERS,
-        "body": json.dumps(cuerpo, ensure_ascii=False),
+        "body": json.dumps(cuerpo, ensure_ascii=False, default=_a_json),
     }
 
 
