@@ -17,4 +17,5 @@ __pycache__/
 # Secretos y entorno local
 .env
 .env.*
-checker.zip
+checker.ziptfplan
+*.zip
