@@ -174,3 +174,11 @@ def test_probar_sin_url_sale_con_2(config, runner):
 def test_comando_inexistente_sale_con_2(config, runner):
     resultado = runner.invoke(cli.app, ["borrar"])
     assert resultado.exit_code == 2
+
+
+def test_listar_tolera_objetivos_sin_fecha(config, runner):
+    cuerpo = {"objetivos": [{"url": "https://a.com/", "enabled": True}]}
+    with patch.object(cli.httpx, "request", return_value=_respuesta(200, cuerpo)):
+        resultado = runner.invoke(cli.app, ["listar"])
+    assert resultado.exit_code == 0
+    assert "https://a.com/" in resultado.output

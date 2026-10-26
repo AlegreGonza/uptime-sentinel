@@ -1,5 +1,4 @@
 import os
-from typing import Annotated
 
 import httpx
 import typer
@@ -23,7 +22,7 @@ def _mostrar_version(valor: bool):
 
 @app.callback()
 def principal(
-    version: Annotated[bool, typer.Option("--version", callback=_mostrar_version, is_eager=True, help="Muestra la versión")] = False,
+    version: bool = typer.Option(False, "--version", callback=_mostrar_version, is_eager=True, help="Muestra la versión"),
 ):
     pass
 
@@ -56,7 +55,7 @@ def _datos(status, cuerpo):
 
 
 @app.command(help="Revisa una URL sin guardarla")
-def probar(url: Annotated[str, typer.Argument(help="URL completa, con https://")]):
+def probar(url: str = typer.Argument(..., help="URL completa, con https://")):
     datos = _datos(*_pedir("POST", "/probar", {"url": url}))
     tabla = Table(title="Resultado", show_header=False)
     for clave, valor in datos.items():
@@ -65,7 +64,7 @@ def probar(url: Annotated[str, typer.Argument(help="URL completa, con https://")
 
 
 @app.command(help="Guarda una URL para monitorearla cada 5 minutos")
-def guardar(url: Annotated[str, typer.Argument(help="URL completa, con https://")]):
+def guardar(url: str = typer.Argument(..., help="URL completa, con https://")):
     datos = _datos(*_pedir("POST", "/objetivos", {"url": url}))
     tabla = Table(title="Objetivo guardado", show_header=False)
     for clave, valor in datos.items():
@@ -78,12 +77,12 @@ def listar():
     datos = _datos(*_pedir("GET", "/objetivos"))
     tabla = Table("URL", "Creado", "Activo")
     for objetivo in datos["objetivos"]:
-        tabla.add_row(objetivo["url"], objetivo["created_at"], "sí" if objetivo["enabled"] else "no")
+        tabla.add_row(objetivo["url"], objetivo.get("created_at", "-"), "sí" if objetivo.get("enabled") else "no")
     consola.print(tabla)
 
 
 @app.command(help="Muestra el historial de una URL")
-def resultados(url: Annotated[str, typer.Argument(help="URL completa, con https://")]):
+def resultados(url: str = typer.Argument(..., help="URL completa, con https://")):
     datos = _datos(*_pedir("GET", "/resultados", params={"url": url}))
     tabla = Table("Fecha", "Status", "ms", "Error")
     for resultado in datos["resultados"]:
