@@ -1,16 +1,12 @@
 import http.client
 import ipaddress
 import json
-import os
 import socket
 import ssl
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
-import boto3
-
-TABLE_NAME = os.environ.get("TABLE_NAME", "uptime-checks")
 TIMEOUT = 10
 MAX_URL_LEN = 2048
 PORT = 443
@@ -134,22 +130,21 @@ def _extraer_url(event):
     return body.get("url") if isinstance(body, dict) else None
 
 
-def handler(event, context):
-    try:
-        url = _extraer_url(event)
-        host, path, ip = validar_url(url)
-    except ValueError as e:
-        return {"status_code": 400, "error": str(e)}
-
-    table = boto3.resource("dynamodb").Table(TABLE_NAME)
+def comprobar(url):
+    host, path, ip = validar_url(url)
     start = time.time()
     status_code, error = _consultar(host, path, ip)
-    item = {
+    return {
         "url": f"https://{host}{path}",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "status_code": status_code,
         "error": error,
         "elapsed_ms": int((time.time() - start) * 1000),
     }
-    table.put_item(Item=item)
-    return item
+
+
+def handler(event, context):
+    try:
+        return comprobar(_extraer_url(event))
+    except ValueError as e:
+        return {"status_code": 400, "error": str(e), "rechazado": True}

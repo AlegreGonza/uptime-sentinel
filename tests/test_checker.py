@@ -1,4 +1,3 @@
-# tests/test_checker.py
 import socket
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -6,7 +5,7 @@ from urllib.parse import urlsplit
 import pytest
 
 import checker
-from checker import URL_RULES, first_match, ip_es_publica, validar, validar_url
+from checker import URL_RULES, comprobar, first_match, ip_es_publica, validar, validar_url
 
 
 def _addrinfo(*ips):
@@ -82,38 +81,37 @@ def test_first_match_uses_first_true_condition():
     assert first_match(-1, table, "none") == "none"
 
 
-def test_handler_rejects_invalid_url_without_touching_dynamodb():
-    with patch("checker.boto3") as mock_boto3:
-        result = checker.handler({"url": "https://127.0.0.1"}, None)
-    assert result["status_code"] == 400
-    mock_boto3.resource.assert_not_called()
+def test_handler_rejects_invalid_url():
+    result = checker.handler({"url": "https://127.0.0.1"}, None)
+    assert result == {
+        "status_code": 400,
+        "error": "Destino no permitido (IP privada o interna)",
+        "rechazado": True,
+    }
 
 
 def test_handler_rejects_malformed_api_gateway_body():
-    with patch("checker.boto3") as mock_boto3:
-        result = checker.handler({"body": "{bad json"}, None)
+    result = checker.handler({"body": "{bad json"}, None)
     assert result["status_code"] == 400
-    mock_boto3.resource.assert_not_called()
+    assert result["rechazado"] is True
 
 
-def test_handler_stores_result_for_valid_url():
-    with patch("checker.boto3") as mock_boto3, \
-         patch("checker.socket.getaddrinfo", return_value=_addrinfo("8.8.8.8")), \
+def test_comprobar_returns_record_for_valid_url():
+    with patch("checker.socket.getaddrinfo", return_value=_addrinfo("8.8.8.8")), \
          patch("checker._consultar", return_value=(200, None)):
-        result = checker.handler({"url": "https://example.com/"}, None)
-
-    table = mock_boto3.resource.return_value.Table.return_value
-    table.put_item.assert_called_once()
-    assert result["status_code"] == 200
-    assert result["url"] == "https://example.com/"
+        record = comprobar("https://example.com/")
+    assert record["url"] == "https://example.com/"
+    assert record["status_code"] == 200
+    assert record["error"] is None
+    assert set(record) == {"url", "timestamp", "status_code", "error", "elapsed_ms"}
 
 
 def test_handler_accepts_api_gateway_body():
-    with patch("checker.boto3"), \
-         patch("checker.socket.getaddrinfo", return_value=_addrinfo("8.8.8.8")), \
+    with patch("checker.socket.getaddrinfo", return_value=_addrinfo("8.8.8.8")), \
          patch("checker._consultar", return_value=(200, None)):
         result = checker.handler({"body": '{"url": "https://example.com/"}'}, None)
     assert result["status_code"] == 200
+    assert "rechazado" not in result
 
 
 def test_resolve_public_accepts_host_with_only_public_addresses():
