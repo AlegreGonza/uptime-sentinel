@@ -65,7 +65,7 @@ def _resolve_public(host):
     ips = {info[4][0] for info in socket.getaddrinfo(host, PORT, type=socket.SOCK_STREAM)}
     if not ips or not all(ip_es_publica(ip) for ip in ips):
         raise ValueError("Destino no permitido (IP privada o interna)")
-    return sorted(ips)[0]
+    return min(ips)
 
 
 def _port(parts):
