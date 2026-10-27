@@ -59,6 +59,7 @@ resource "aws_lambda_function" "monitor" {
       CHECKER_FUNCTION = aws_lambda_function.checker.function_name
       TARGETS_TABLE    = aws_dynamodb_table.targets.name
       RESULTS_TABLE    = aws_dynamodb_table.checks.name
+      ALERTS_TOPIC     = aws_sns_topic.alerts.arn
     }
   }
 }

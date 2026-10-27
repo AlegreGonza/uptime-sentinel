@@ -23,3 +23,23 @@ resource "aws_cloudwatch_metric_alarm" "monitor_silent" {
   treat_missing_data  = "breaching"
   alarm_actions       = [aws_sns_topic.alerts.arn]
 }
+
+resource "aws_iam_role_policy" "monitor_alerts" {
+  name = "uptime-monitor-alerts-dev"
+  role = aws_iam_role.monitor.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:Query"]
+        Resource = aws_dynamodb_table.checks.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["sns:Publish"]
+        Resource = aws_sns_topic.alerts.arn
+      },
+    ]
+  })
+}
