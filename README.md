@@ -1,12 +1,17 @@
 # uptime-sentinel
 
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![Terraform](https://img.shields.io/badge/Terraform-%E2%89%A51.10-7B42BC?logo=terraform&logoColor=white)
+![AWS](https://img.shields.io/badge/AWS-Lambda%20%7C%20DynamoDB%20%7C%20API%20Gateway-FF9900?logo=amazonaws&logoColor=white)
+![Cost](https://img.shields.io/badge/cost-%240%20free%20tier-brightgreen)
+
 Serverless website uptime monitor on AWS. It checks your sites every 5 minutes, stores the history of every check, sends email alerts when a site goes down or recovers, and lets you query everything through a protected API or a terminal CLI.
 
 ## Table of contents
 
-- [What it does](#what-it-does)
+- [How it works](#how-it-works)
 - [Architecture](#architecture)
-- [Alerts](#alerts)
+- [Alert logic](#alert-logic)
 - [Security](#security)
 - [Requirements](#requirements)
 - [CLI usage](#cli-usage)
@@ -17,40 +22,63 @@ Serverless website uptime monitor on AWS. It checks your sites every 5 minutes, 
 - [Costs](#costs)
 - [Roadmap](#roadmap)
 
-## What it does
+## How it works
 
-- **Checks URLs on a fixed interval.** An EventBridge rule triggers the monitor every 5 minutes.
-- **Stores history.** Every check is saved in DynamoDB with its status, response time, and error if any.
-- **Alerts by email.** A pre-alert on the first failure, a down alert after three consecutive failures, and a recovery notice when the site comes back.
-- **Validates before saving.** A URL is only accepted if it is public and uses HTTPS.
-- **Query from the terminal.** The CLI shows targets and results in tables.
-
-A portfolio project to practice DevOps and cloud on real infrastructure, deployed with Terraform.
+```mermaid
+flowchart LR
+    EB["⏰ EventBridge<br/>every 5 min"] --> M["λ monitor"]
+    M -->|Scan enabled| T[("DynamoDB<br/>targets")]
+    M -->|Invoke| C["λ checker"]
+    C -->|HTTPS| W["🌐 Public website"]
+    M -->|PutItem| R[("DynamoDB<br/>checks")]
+    M -->|Query last 4| R
+    M -->|Publish| SNS["📣 SNS<br/>uptime-alerts"]
+    SNS -->|Email| U["📧 You"]
+    CW["📊 CloudWatch alarm<br/>monitor silent"] -->|Alarm| SNS
+    CLI["💻 CLI"] -->|x-api-key| GW["API Gateway"]
+    GW --> A["λ api"]
+    A -->|PutItem / Scan| T
+    A -->|Query| R
+    A -->|Invoke for /probar| C
+```
 
 ## Architecture
 
 | Component | Role | Can write |
 |---|---|---|
 | `checker` | Validates the URL and makes the request | Nothing, it only evaluates |
-| `monitor` | Runs the scheduled checks, stores results, and triggers alerts | Checks, alerts |
+| `monitor` | Runs the scheduled checks, stores results, triggers alerts | Checks, alerts |
 | `api` | Exposes four routes | Targets |
 | `cli` | Consumes the API from the terminal | Nothing directly |
-| SNS topic `uptime-alerts-dev` | Delivers alerts to the subscribed email | Nothing, it only delivers |
-| CloudWatch alarm `uptime-monitor-silent-dev` | Fires if the monitor does not run for 15 minutes | Nothing, it only notifies |
+| SNS topic `uptime-alerts-dev` | Delivers alerts to the subscribed email | Nothing |
+| CloudWatch alarm `uptime-monitor-silent-dev` | Fires if the monitor does not run for 15 minutes | Nothing |
 
-## Alerts
+### API routes
 
-The monitor evaluates the most recent checks of each URL after every run:
+| Method | Route | Description |
+|---|---|---|
+| `POST` | `/probar` | Checks a URL without saving it |
+| `POST` | `/objetivos` | Saves a URL to monitor |
+| `GET` | `/objetivos` | Lists saved targets |
+| `GET` | `/resultados?url=...` | Shows the history of a URL |
 
-| Alert | When it is sent |
-|---|---|
-| PRE-ALERT | The check fails for the first time. |
-| DOWN | Three consecutive checks fail. Sent once, on the transition. |
-| RECOVERED | The site responds again after a DOWN alert. |
+## Alert logic
 
-A check counts as a failure if it has a connection error or if the HTTP status is not 200. Alerts are sent only on transitions, so a site that stays down does not flood your inbox.
+The monitor evaluates the last four checks of each URL after every run. A check fails if it has a connection error or if the HTTP status is not `200`.
 
-The silence alarm is separate: it notifies if the monitor itself stops running.
+```mermaid
+stateDiagram-v2
+    [*] --> OK
+    OK --> Pre: 1st failure<br/>📨 PRE-ALERT
+    Pre --> Pre: 2nd failure<br/>(silent)
+    Pre --> Down: 3rd consecutive failure<br/>🚨 DOWN alert
+    Pre --> OK: success<br/>(silent)
+    Down --> Down: more failures<br/>(silent)
+    Down --> OK: success<br/>✅ RECOVERED alert
+    OK --> OK: success<br/>(silent)
+```
+
+Alerts fire only on transitions, so a site that stays down does not flood your inbox. A separate alarm notifies you if the monitor itself stops running.
 
 ## Security
 
@@ -64,16 +92,18 @@ The API requires `x-api-key` on every route. A usage plan limits traffic to 5 re
 
 Each Lambda has only the permissions it needs:
 
-- The **monitor** reads targets, writes checks, queries recent checks, and publishes to the alerts topic.
-- The **API** writes targets and reads checks.
-- The **checker** has no table access at all.
+| Lambda | DynamoDB | Other |
+|---|---|---|
+| `monitor` | Scan targets, PutItem and Query checks | Publish to the alerts topic, invoke checker |
+| `api` | PutItem and Scan targets, Query checks | Invoke checker (for `/probar`) |
+| `checker` | None | None |
 
 ## Requirements
 
 - Python 3.13 or later
 - Terraform 1.10 or later
 - AWS CLI with configured credentials
-- An AWS account (the project is designed to stay within the free tier)
+- An AWS account (designed to stay within the free tier)
 
 ## CLI usage
 
@@ -91,8 +121,6 @@ $env:UPTIME_API_KEY = "<API key>"
 ```
 
 Get the URL from `terraform output api_url` in `infra/envs/dev`. Get the API key from the API Gateway console. It is never stored in the repository.
-
-Commands:
 
 ```bash
 python tools/cli.py --version
@@ -114,6 +142,14 @@ Exit codes: `0` on success, `1` if the API returned an error, `2` if configurati
 ## Deployment
 
 Resources live in `infra/envs/dev`. Terraform state is stored in an S3 bucket with native locking.
+
+```mermaid
+flowchart LR
+    A["terraform init"] --> B["terraform plan -out=tfplan"]
+    B --> C["terraform apply tfplan"]
+    C --> D["Use the API"]
+    D --> E["terraform destroy<br/>(after each verification)"]
+```
 
 ```bash
 cd infra/envs/dev
