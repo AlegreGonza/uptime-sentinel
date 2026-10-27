@@ -200,6 +200,7 @@ Checkov reports 38 findings. Each one is accepted for cost, design, or because i
 | CKV2_AWS_29 | API stage | WAF has a fixed monthly cost. |
 | CKV2_AWS_51 | API stage | Client certificates require a PKI. The API uses API keys instead. |
 | CKV2_AWS_53 | API methods | Request validation happens in the Lambda code. |
+| CKV_AWS_237 | API Gateway REST API | Create before destroy is not set on the root resource. The deployment already sets it (CKV_AWS_217 passes), and replacing the root API is rare in this project. |
 
 ## Costs
 
