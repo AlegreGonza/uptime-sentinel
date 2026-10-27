@@ -41,8 +41,17 @@ resource "aws_iam_role_policy" "monitor" {
 
 data "archive_file" "monitor" {
   type        = "zip"
-  source_file = "${path.module}/../../../src/monitor.py"
   output_path = "${path.module}/monitor.zip"
+
+  source {
+    content  = file("${path.module}/../../../src/monitor.py")
+    filename = "monitor.py"
+  }
+
+  source {
+    content  = file("${path.module}/../../../src/riesgo.py")
+    filename = "riesgo.py"
+  }
 }
 
 resource "aws_lambda_function" "monitor" {
