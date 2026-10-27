@@ -169,6 +169,18 @@ terraform destroy
 
 ## Tests
 
+Install the development dependencies:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+`test_monitor.py` needs the `ALERTS_TOPIC` environment variable before it runs. Any placeholder ARN works for the tests:
+
+```powershell
+$env:ALERTS_TOPIC = "arn:aws:sns:us-east-1:000000000000:test"
+```
+
 Unit tests, without touching AWS:
 
 ```bash

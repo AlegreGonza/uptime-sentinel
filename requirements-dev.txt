@@ -1,0 +1,3 @@
+-r requirements-cli.txt
+boto3==1.43.118
+pytest==9.1.1
