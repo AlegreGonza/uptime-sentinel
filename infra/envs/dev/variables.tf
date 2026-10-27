@@ -21,3 +21,7 @@ variable "src_path" {
   type    = string
   default = "../../../src/checker.py"
 }
+
+variable "alert_email" {
+  type = string
+}
