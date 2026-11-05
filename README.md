@@ -9,6 +9,7 @@ Serverless website uptime monitor on AWS. It checks your sites every 5 minutes, 
 
 ## Table of contents
 
+- [Overview](#overview)
 - [How it works](#how-it-works)
 - [Architecture](#architecture)
 - [Alert logic](#alert-logic)
@@ -19,8 +20,15 @@ Serverless website uptime monitor on AWS. It checks your sites every 5 minutes, 
 - [Tests](#tests)
 - [Security scanning in CI](#security-scanning-in-ci)
 - [Accepted Checkov findings](#accepted-checkov-findings)
+- [Design decisions and known limitations](#design-decisions-and-known-limitations)
 - [Costs](#costs)
 - [Roadmap](#roadmap)
+
+## Overview
+
+uptime-sentinel answers one question: is my website up right now, and was it up yesterday? It runs entirely on AWS serverless services, so there are no servers to patch or keep running. You register a URL once, and from then on the system checks it every 5 minutes, keeps a history, and emails you when something changes.
+
+The project is built to be small, auditable, and cheap. Every part has a single responsibility, and the security decisions are documented where they are made.
 
 ## How it works
 
@@ -41,7 +49,15 @@ flowchart LR
     AP --> C
 ```
 
+1. **EventBridge** triggers the monitor every 5 minutes.
+2. **The `monitor` Lambda** reads the active URLs from the `targets` table and invokes the checker for each one.
+3. **The `checker` Lambda** validates the URL, makes the HTTP request, and returns the result: status code, error if any, and response time.
+4. The monitor stores each result in the `checks` table, looks at the most recent checks, and publishes to **SNS** when the state changes. SNS delivers the email.
+5. **API Gateway and the `api` Lambda** expose four routes to save URLs, test a URL without saving it, list targets, and read the history. The CLI consumes that API.
+
 ## Architecture
+
+![Architecture diagram](docs/architecture.png)
 
 | Component | Role | Can write |
 |---|---|---|
@@ -51,6 +67,8 @@ flowchart LR
 | `cli` | Consumes the API from the terminal | Nothing directly |
 | SNS topic `uptime-alerts-dev` | Delivers alerts to the subscribed email | Nothing |
 | CloudWatch alarm `uptime-monitor-silent-dev` | Fires if the monitor does not run for 15 minutes | Nothing |
+
+Each component can only write what its role requires. The checker is read-only by design: it never touches the database.
 
 ### API routes
 
@@ -75,14 +93,18 @@ stateDiagram-v2
     RECUPERADO --> OK
 ```
 
-Alerts fire only on transitions, so a site that stays down does not flood your inbox. A separate alarm notifies you if the monitor itself stops running.
+- **PRE-ALERTA**: the first failure.
+- **CAÍDA**: three consecutive failures.
+- **RECUPERADO**: the site responds again after having been down.
+
+Alerts fire only on transitions, so a site that stays down does not flood your inbox. A separate alarm notifies you if the monitor itself stops running, which covers the case where the monitoring is the thing that broke.
 
 ## Security
 
-The checker rejects any URL that could point to the project's own infrastructure or the internal network:
+The checker makes requests to URLs chosen by the user, which can be abused to reach internal services, such as the AWS metadata endpoint. It defends against that in several layers:
 
 - HTTPS only, port 443 only, and no credentials in the URL.
-- Resolves DNS and rejects non-public addresses, including IPv4-mapped, 6to4, NAT64, and Teredo.
+- Resolves DNS and rejects non-public addresses, including IPv4-mapped, 6to4, NAT64, and Teredo forms.
 - Connects to the already validated IP, not the hostname, to prevent DNS changes between validation and connection.
 
 The API requires `x-api-key` on every route. A usage plan limits traffic to 5 requests per second, bursts of 10, and a quota of 1000 per day.
@@ -138,7 +160,7 @@ Exit codes: `0` on success, `1` if the API returned an error, `2` if configurati
 
 ## Deployment
 
-Resources live in `infra/envs/dev`. Terraform state is stored in an S3 bucket with native locking.
+Resources live in `infra/envs/dev`. Terraform state is stored in an S3 bucket with native locking, so two applies cannot overwrite each other.
 
 ```powershell
 cd infra/envs/dev
@@ -150,6 +172,8 @@ terraform apply tfplan
 
 `backend.hcl` and `dev.tfvars` are not in the repository. Create them locally with your own values. `dev.tfvars.example` shows the variables you need.
 
+Deployment is manual. There is no CI pipeline that applies changes to AWS.
+
 To remove everything:
 
 ```powershell
@@ -158,7 +182,13 @@ terraform destroy
 
 ## Tests
 
-Unit tests, without touching AWS:
+Unit tests, without touching AWS (141 tests). They use mocks for boto3, sockets and HTTP, and cover:
+
+- **Checker**: non-public IP detection, URL rules, pinned connection.
+- **Monitor**: alert transitions, pagination, partial failures.
+- **API**: every route, every error code, no internal details leaked.
+- **CLI**: every command and every error path.
+- **Risk index**: baseline, recovery, and edge cases.
 
 ```powershell
 pip install -r requirements-dev.txt
@@ -168,7 +198,7 @@ python -m pytest -v
 
 `test_monitor.py` needs the `ALERTS_TOPIC` environment variable before it runs. Any placeholder value works for the tests.
 
-Integration tests against the deployed infrastructure, marked `integration` and excluded by default:
+Integration tests against the deployed infrastructure, marked `integration` and excluded by default. They write real data to DynamoDB and call the live API, so run them on purpose:
 
 ```powershell
 python -m pytest -m integration -v
@@ -202,17 +232,22 @@ Checkov reports 38 findings. Each one is accepted for cost, design, or because i
 | CKV2_AWS_53 | API methods | Request validation happens in the Lambda code. |
 | CKV_AWS_237 | API Gateway REST API | Create before destroy is not set on the root resource. The deployment already sets it (CKV_AWS_217 passes), and replacing the root API is rare in this project. |
 
+## Design decisions and known limitations
+
+- **Redirects count as failures.** The checker does not follow redirects, so a site that answers with a 301 (for example, HTTP to HTTPS or a bare domain to `www`) is reported as down. Following redirects safely would mean re-running the full URL validation on every hop.
+- **Checks run in series.** The monitor invokes the checker for each URL one after another, with a 120-second timeout. With many targets, a run can be cut off before it finishes. Parallel invocations would fix this.
+- **Risk index needs history.** It is only calculated after 24 checks per URL, so it stays empty for new targets.
+- **Monitoring data is disposable.** DynamoDB does not use point-in-time recovery, and logs are kept for 14 days. This is intentional for a project of this size.
+- **No pipeline.** Deployment is manual with Terraform. Automating it with GitHub Actions and OIDC was considered and deliberately left out.
+
 ## Costs
 
-The whole project uses free-tier services. The monitor writes to DynamoDB every 5 minutes, which is negligible. Even so, the infrastructure is destroyed after each verification so nothing keeps running.
+The whole project is designed to run on free-tier services. The monitor invokes the checker and writes to DynamoDB every 5 minutes, about 8,600 times a month, which is negligible. The silence alarm costs cents per month. Even so, the infrastructure is destroyed after each verification so nothing keeps running.
 
 ## Roadmap
 
 - [x] Checker, API, and monitor
 - [x] Alerts by SNS and silence alarm
 - [x] Security scanning in CI with Gitleaks and Checkov
-- [ ] Deployment from GitHub Actions with OIDC
-- [ ] `riesgo.py` with a baseline and a 0-100 risk index
+- [x] `riesgo.py` with a baseline and a 0-100 risk index
 - [x] Documented incident case
-
-
