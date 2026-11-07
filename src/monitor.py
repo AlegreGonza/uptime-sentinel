@@ -7,7 +7,7 @@ from itertools import takewhile
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
 
-from riesgo import risk_index
+from riesgo import VENTANA_RIESGO, risk_index
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -16,11 +16,17 @@ CHECKER_FUNCTION = os.environ["CHECKER_FUNCTION"]
 TARGETS_TABLE = os.environ["TARGETS_TABLE"]
 RESULTS_TABLE = os.environ["RESULTS_TABLE"]
 ALERTS_TOPIC = os.environ["ALERTS_TOPIC"]
+
+DYNAMODB = boto3.resource("dynamodb")
+LAMBDA = boto3.client("lambda")
+SNS = boto3.client("sns")
+TABLA_OBJETIVOS = DYNAMODB.Table(TARGETS_TABLE)
+TABLA_RESULTADOS = DYNAMODB.Table(RESULTS_TABLE)
 REQUIRED_FIELDS = ("url", "timestamp", "status_code", "error", "elapsed_ms")
 UMBRAL_CAIDA = 3
 CANTIDAD_HISTORIAL = UMBRAL_CAIDA + 1
 UMBRAL_RIESGO = 50
-CANTIDAD_HISTORIAL_RIESGO = 60
+CANTIDAD_HISTORIAL_RIESGO = VENTANA_RIESGO
 
 
 def _paginar(consulta: Callable, **kwargs) -> Iterator[dict]:
@@ -82,16 +88,18 @@ def _revisar_objetivo(lambda_client, tabla_resultados, url):
 
 
 def _ultimos_chequeos(tabla_resultados, url, cantidad):
-    """Devuelve los chequeos más recientes primero."""
-    return list(
-        _paginar(
-            tabla_resultados.query,
-            KeyConditionExpression=Key("url").eq(url),
-            ScanIndexForward=False,
-            Limit=cantidad,
-            ConsistentRead=True,
-        )
+    """Devuelve los chequeos más recientes primero.
+
+    Una sola consulta con Limit: sin filtros, DynamoDB devuelve hasta `cantidad`
+    ítems y no hace falta paginar. Paginar acá traía todo el historial.
+    """
+    respuesta = tabla_resultados.query(
+        KeyConditionExpression=Key("url").eq(url),
+        ScanIndexForward=False,
+        Limit=cantidad,
+        ConsistentRead=True,
     )
+    return list(respuesta.get("Items", []))[:cantidad]
 
 
 def _fallo(registro):
@@ -139,14 +147,9 @@ def _evaluar_riesgo(sns_client, tabla_resultados, url):
 
 
 def handler(event, context):
-    dynamodb = boto3.resource("dynamodb")
-    lambda_client = boto3.client("lambda")
-    sns_client = boto3.client("sns")
-    targets = dynamodb.Table(TARGETS_TABLE)
-    results = dynamodb.Table(RESULTS_TABLE)
     checked = rejected = failed = 0
-    for url in _objetivos_habilitados(targets):
-        estado = _ejecutar_paso("la revisión", url, _revisar_objetivo, lambda_client, results, url)
+    for url in _objetivos_habilitados(TABLA_OBJETIVOS):
+        estado = _ejecutar_paso("la revisión", url, _revisar_objetivo, LAMBDA, TABLA_RESULTADOS, url)
         if estado is None:
             failed += 1
             continue
@@ -154,6 +157,6 @@ def handler(event, context):
             rejected += 1
             continue
         checked += 1
-        _ejecutar_paso("la evaluación de alertas", url, _evaluar_alertas, sns_client, results, url)
-        _ejecutar_paso("la evaluación de riesgo", url, _evaluar_riesgo, sns_client, results, url)
+        _ejecutar_paso("la evaluación de alertas", url, _evaluar_alertas, SNS, TABLA_RESULTADOS, url)
+        _ejecutar_paso("la evaluación de riesgo", url, _evaluar_riesgo, SNS, TABLA_RESULTADOS, url)
     return {"checked": checked, "rejected": rejected, "failed": failed}
