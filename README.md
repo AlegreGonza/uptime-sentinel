@@ -182,7 +182,7 @@ terraform destroy
 
 ## Tests
 
-Unit tests, without touching AWS (141 tests). They use mocks for boto3, sockets and HTTP, and cover:
+Unit tests, without touching AWS. They use mocks for boto3, sockets and HTTP, and cover:
 
 - **Checker**: non-public IP detection, URL rules, pinned connection.
 - **Monitor**: alert transitions, pagination, partial failures.
@@ -192,11 +192,10 @@ Unit tests, without touching AWS (141 tests). They use mocks for boto3, sockets 
 
 ```powershell
 pip install -r requirements-dev.txt
-$env:ALERTS_TOPIC = "arn:aws:sns:us-east-1:000000000000:test"
 python -m pytest -v
 ```
 
-`test_monitor.py` needs the `ALERTS_TOPIC` environment variable before it runs. Any placeholder value works for the tests.
+`tests/conftest.py` sets placeholder values for the environment variables the code reads at import time, so no AWS configuration is needed to run the unit tests.
 
 Integration tests against the deployed infrastructure, marked `integration` and excluded by default. They write real data to DynamoDB and call the live API, so run them on purpose:
 
@@ -208,8 +207,8 @@ python -m pytest -m integration -v
 
 The Seguridad workflow runs on every push and pull request:
 
-- Gitleaks scans the full git history for secrets.
-- Checkov analyzes the Terraform code. It runs with `--soft-fail`, so findings are reviewed manually and listed below.
+- **Gitleaks** scans the commits of each push and pull request in CI. Run `gitleaks detect --source . -v` locally to scan the full git history.
+- **Checkov** analyzes the Terraform code. It runs with `--soft-fail`, so findings are reviewed manually and listed below.
 
 ## Accepted Checkov findings
 
@@ -217,7 +216,7 @@ Checkov reports 38 findings. Each one is accepted for cost, design, or because i
 
 | Check | Resource | Reason |
 |---|---|---|
-| CKV_AWS_26 | SNS topic | KMS encryption has a cost. `alias/aws/sns` also blocks CloudWatch from publishing to the topic. |
+| CKV_AWS_26 | SNS topic | KMS encryption has a cost. The AWS-managed key `alias/aws/sns` would also block CloudWatch alarms from publishing to the topic. |
 | CKV_AWS_119, CKV_AWS_28 | DynamoDB | CMK encryption has a cost. PITR is skipped because monitoring data is disposable. |
 | CKV_AWS_158, CKV_AWS_338 | Log groups | KMS encryption has a cost. Retention is 14 days, not one year, to avoid storage costs. |
 | CKV_AWS_173 | Lambda env vars | CMK encryption has a cost. Default encryption is used. |
@@ -238,7 +237,7 @@ Checkov reports 38 findings. Each one is accepted for cost, design, or because i
 - **Checks run in series.** The monitor invokes the checker for each URL one after another, with a 120-second timeout. With many targets, a run can be cut off before it finishes. Parallel invocations would fix this.
 - **Risk index needs history.** It is only calculated after 24 checks per URL, so it stays empty for new targets.
 - **Monitoring data is disposable.** DynamoDB does not use point-in-time recovery, and logs are kept for 14 days. This is intentional for a project of this size.
-- **No pipeline.** Deployment is manual with Terraform. Automating it with GitHub Actions and OIDC was considered and deliberately left out.
+- **No pipeline.** Deployment is manual with Terraform. There is no workflow that applies changes to AWS.
 
 ## Costs
 
