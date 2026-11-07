@@ -4,6 +4,7 @@ import boto3
 
 RECENT_WINDOW = 4
 MIN_BASELINE = 20
+VENTANA_RIESGO = 60
 
 
 def _failed(check):
@@ -40,20 +41,16 @@ def _urls(table):
         kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
 
 
-def _checks_for(table, url):
-    items = []
-    kwargs = {
-        "KeyConditionExpression": "#u = :u",
-        "ExpressionAttributeNames": {"#u": "url"},
-        "ExpressionAttributeValues": {":u": url},
-        "ScanIndexForward": True,
-    }
-    while True:
-        page = table.query(**kwargs)
-        items.extend(page["Items"])
-        if "LastEvaluatedKey" not in page:
-            return items
-        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+def _checks_for(table, url, limite=VENTANA_RIESGO):
+    """Devuelve los últimos `limite` chequeos, del más antiguo al más reciente."""
+    respuesta = table.query(
+        KeyConditionExpression="#u = :u",
+        ExpressionAttributeNames={"#u": "url"},
+        ExpressionAttributeValues={":u": url},
+        ScanIndexForward=False,
+        Limit=limite,
+    )
+    return list(reversed(respuesta.get("Items", [])))
 
 
 def main():

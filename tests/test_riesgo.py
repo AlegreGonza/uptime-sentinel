@@ -3,7 +3,7 @@ from decimal import Decimal
 import pytest
 
 import riesgo
-from riesgo import MIN_BASELINE, RECENT_WINDOW, _checks_for, _urls, risk_index
+from riesgo import MIN_BASELINE, RECENT_WINDOW, VENTANA_RIESGO, _checks_for, _urls, risk_index
 
 MIN_CHECKS = MIN_BASELINE + RECENT_WINDOW
 
@@ -108,17 +108,12 @@ def test_scan_follows_all_pages_for_targets():
     assert table.calls[1]["ExclusiveStartKey"] == {"url": "https://a.example/"}
 
 
-def test_query_follows_all_pages_and_reads_oldest_first():
-    table = PagedTable(
-        [
-            {"Items": make_checks([200])[:1], "LastEvaluatedKey": {"url": "x", "timestamp": "t"}},
-            {"Items": make_checks([500])},
-        ]
-    )
+def test_query_reads_only_the_recent_window_oldest_first():
+    table = PagedTable([{"Items": make_checks([500, 200])[::-1]}])
     items = _checks_for(table, "https://a.example/")
-    assert len(items) == 2
-    assert table.calls[0]["ScanIndexForward"] is True
-    assert table.calls[1]["ExclusiveStartKey"] == {"url": "x", "timestamp": "t"}
+    assert table.calls[0]["ScanIndexForward"] is False
+    assert table.calls[0]["Limit"] == VENTANA_RIESGO
+    assert [c["timestamp"] for c in items] == sorted(c["timestamp"] for c in items)
 
 
 def test_main_reports_each_target(monkeypatch, capsys):

@@ -44,7 +44,12 @@ def _pedir(metodo, ruta, cuerpo=None, params=None):
     except httpx.HTTPError as error:
         errores.print(f"[red]No se pudo conectar con la API:[/] {error}")
         raise typer.Exit(1)
-    return respuesta.status_code, respuesta.json()
+    try:
+        cuerpo = respuesta.json()
+    except ValueError:
+        errores.print(f"[red]La API respondió algo que no es JSON (código {respuesta.status_code})[/]")
+        raise typer.Exit(1)
+    return respuesta.status_code, cuerpo
 
 
 def _datos(status, cuerpo):

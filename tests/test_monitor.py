@@ -20,13 +20,12 @@ def _run(pages, invoke_results, put_results=None):
     results = MagicMock()
     if put_results is not None:
         results.put_item.side_effect = put_results
-    dynamodb = MagicMock()
-    dynamodb.Table.side_effect = [targets, results]
     lambda_client = MagicMock()
     lambda_client.invoke.side_effect = invoke_results
-    with patch("monitor.boto3") as boto3:
-        boto3.resource.return_value = dynamodb
-        boto3.client.return_value = lambda_client
+    with patch.object(monitor, "TABLA_OBJETIVOS", targets), \
+            patch.object(monitor, "TABLA_RESULTADOS", results), \
+            patch.object(monitor, "LAMBDA", lambda_client), \
+            patch.object(monitor, "SNS", MagicMock()):
         summary = monitor.handler({}, None)
     return summary, results, lambda_client
 
