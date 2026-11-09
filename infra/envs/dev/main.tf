@@ -16,10 +16,12 @@ provider "aws" {
 }
 
 resource "aws_dynamodb_table" "checks" {
-  name         = "uptime-checks-dev"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "url"
-  range_key    = "timestamp"
+  name           = "uptime-checks-dev"
+  billing_mode   = "PROVISIONED"
+  read_capacity  = 5
+  write_capacity = 5
+  hash_key       = "url"
+  range_key      = "timestamp"
 
   attribute {
     name = "url"
@@ -61,5 +63,11 @@ resource "aws_lambda_function" "checker" {
   runtime          = "python3.13"
   filename         = data.archive_file.checker.output_path
   source_code_hash = data.archive_file.checker.output_base64sha256
-  timeout          = 15
+  timeout          = 25
+  memory_size      = 128
+}
+
+resource "aws_cloudwatch_log_group" "checker" {
+  name              = "/aws/lambda/uptime-checker-dev"
+  retention_in_days = 14
 }

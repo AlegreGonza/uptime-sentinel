@@ -1,8 +1,9 @@
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
+from urllib.parse import quote, urlsplit
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -15,133 +16,172 @@ CHECKER_FUNCTION = os.environ["CHECKER_FUNCTION"]
 TARGETS_TABLE = os.environ["TARGETS_TABLE"]
 RESULTS_TABLE = os.environ["RESULTS_TABLE"]
 MAX_RESULTS = 100
+PATH_SAFE = "/?=&%:@!$'()*+,;~-._"  # must match checker.validate_url
 HEADERS = {"Content-Type": "application/json"}
 
 dynamodb = boto3.resource("dynamodb")
 lambda_client = boto3.client("lambda")
-tabla_objetivos = dynamodb.Table(TARGETS_TABLE)
-tabla_resultados = dynamodb.Table(RESULTS_TABLE)
+targets_db = dynamodb.Table(TARGETS_TABLE)
+checks_db = dynamodb.Table(RESULTS_TABLE)
 
 
-class ErrorCliente(Exception):
-    def __init__(self, status, cuerpo):
-        super().__init__(str(cuerpo))
+class ClientRequestError(Exception):
+    def __init__(self, status, body):
+        super().__init__(str(body))
         self.status = status
-        self.cuerpo = cuerpo
+        self.body = body
 
 
-def _a_json(valor):
-    if isinstance(valor, Decimal):
-        return int(valor) if valor == valor.to_integral_value() else float(valor)
-    raise TypeError(f"Tipo no serializable: {type(valor)}")
+def _to_json(value):
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    raise TypeError(f"Type is not serializable: {type(value)}")
 
 
-def _respuesta(status, cuerpo):
+def _response(status, body):
     return {
         "statusCode": status,
         "headers": HEADERS,
-        "body": json.dumps(cuerpo, ensure_ascii=False, default=_a_json),
+        "body": json.dumps(body, ensure_ascii=False, default=_to_json),
     }
 
 
-def _leer_url(event):
+MAX_BODY_CHARS = 4096
+
+
+def _read_url(event):
+    body = event.get("body") or "{}"
+    if len(body) > MAX_BODY_CHARS:
+        raise ClientRequestError(400, {"error": "Request body is too large"})
     try:
-        url = json.loads(event.get("body") or "{}")["url"].strip()
+        url = json.loads(body)["url"].strip()
         if not url:
             raise ValueError
     except (ValueError, KeyError, TypeError, AttributeError):
-        raise ErrorCliente(400, {"error": "Falta la URL"})
+        raise ClientRequestError(400, {"error": "URL is required"})
     return url
 
 
-def _verificar_respuesta(respuesta, cuerpo):
-    if respuesta.get("FunctionError"):
-        logger.error("El checker falló: %s", cuerpo)
-        raise RuntimeError("El checker falló al revisar la URL")
-    if cuerpo.get("rechazado"):
-        raise ErrorCliente(400, cuerpo)
-    return cuerpo
+def _check_response(response, body):
+    if response.get("FunctionError"):
+        logger.error("The checker failed: %s", body)
+        if "timed out" in str(body).lower():
+            raise ClientRequestError(504, {"error": "The site took too long to respond"})
+        raise RuntimeError("The checker failed to check the URL")
+    if not isinstance(body, dict):
+        raise RuntimeError("The checker returned an invalid response")  # noqa: TRY004 caught as RuntimeError below
+    if body.get("rejected"):
+        raise ClientRequestError(400, body)
+    return body
 
 
-def _invocar_checker(url):
+def _invoke_checker(url):
     try:
-        respuesta = lambda_client.invoke(
+        response = lambda_client.invoke(
             FunctionName=CHECKER_FUNCTION,
             Payload=json.dumps({"url": url}),
         )
-        cuerpo = json.loads(respuesta["Payload"].read())
+        body = json.loads(response["Payload"].read())
     except ClientError:
-        logger.exception("No se pudo invocar al checker")
-        raise RuntimeError("No se pudo consultar el checker")
-    return _verificar_respuesta(respuesta, cuerpo)
+        logger.exception("Could not invoke the checker")
+        raise RuntimeError("Could not reach the checker")
+    return _check_response(response, body)
 
 
-def _probar(event):
-    return _respuesta(200, _invocar_checker(_leer_url(event)))
+def _probe(event):
+    return _response(200, _invoke_checker(_read_url(event)))
 
 
-def _guardar(event):
-    resultado = _invocar_checker(_leer_url(event))
-    objetivo = {
-        "url": resultado["url"],
-        "created_at": datetime.now(timezone.utc).isoformat(),
+def _expected_status(event):
+    """Optional status code that counts as OK for this target (None = any 2xx or 3xx)."""
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except ValueError:
+        return None  # _read_url reports the malformed body
+    value = body.get("expected_status") if isinstance(body, dict) else None
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 100 <= value <= 599:
+        raise ClientRequestError(400, {"error": "expected_status must be an integer from 100 to 599"})
+    return value
+
+
+def _save(event):
+    expected = _expected_status(event)
+    result = _invoke_checker(_read_url(event))
+    target = {
+        "url": result["url"],
+        "created_at": datetime.now(UTC).isoformat(),
         "enabled": True,
     }
+    if expected is not None:
+        target["expected_status"] = expected
     try:
-        tabla_objetivos.put_item(
-            Item=objetivo,
+        targets_db.put_item(
+            Item=target,
             ConditionExpression="attribute_not_exists(#u)",
             ExpressionAttributeNames={"#u": "url"},
         )
     except ClientError as e:
         if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
             raise
-        raise ErrorCliente(409, {"error": "La URL ya está guardada", "url": objetivo["url"]})
-    return _respuesta(201, objetivo)
+        raise ClientRequestError(409, {"error": "URL is already saved", "url": target["url"]})
+    return _response(201, target)
 
 
-def _listar(event):
-    objetivos = []
+def _list(event):
+    targets = []
     kwargs = {}
     while True:
-        pagina = tabla_objetivos.scan(**kwargs)
-        objetivos.extend(pagina.get("Items", []))
-        if "LastEvaluatedKey" not in pagina:
+        page = targets_db.scan(**kwargs)
+        targets.extend(page.get("Items", []))
+        if "LastEvaluatedKey" not in page:
             break
-        kwargs["ExclusiveStartKey"] = pagina["LastEvaluatedKey"]
-    return _respuesta(200, {"objetivos": objetivos})
+        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    return _response(200, {"targets": targets})
 
 
-def _resultados(event):
+def _normalizar_url(url):
+    """Same shape the checker stores: https://host/path?query (see checker.validate_url)."""
+    parts = urlsplit(url)
+    if not parts.hostname:
+        return url
+    host = parts.hostname.rstrip(".")
+    raw = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    return f"https://{host}{quote(raw, safe=PATH_SAFE)}"
+
+
+def _results(event):
     url = ((event.get("queryStringParameters") or {}).get("url") or "").strip()
     if not url:
-        raise ErrorCliente(400, {"error": "Falta el parámetro url"})
-    respuesta = tabla_resultados.query(
+        raise ClientRequestError(400, {"error": "url query parameter is required"})
+    url = _normalizar_url(url)
+    response = checks_db.query(
         KeyConditionExpression=Key("url").eq(url),
         ScanIndexForward=False,
         Limit=MAX_RESULTS,
     )
-    return _respuesta(200, {"resultados": respuesta.get("Items", [])})
+    return _response(200, {"results": response.get("Items", [])})
 
 
-RUTAS = {
-    ("POST", "/probar"): _probar,
-    ("POST", "/objetivos"): _guardar,
-    ("GET", "/objetivos"): _listar,
-    ("GET", "/resultados"): _resultados,
+ROUTES = {
+    ("POST", "/probe"): _probe,
+    ("POST", "/targets"): _save,
+    ("GET", "/targets"): _list,
+    ("GET", "/results"): _results,
 }
 
 
 def handler(event, context):
-    funcion = RUTAS.get((event.get("httpMethod"), event.get("path")))
-    if funcion is None:
-        return _respuesta(404, {"error": "Ruta no encontrada"})
+    func = ROUTES.get((event.get("httpMethod"), event.get("path")))
+    if func is None:
+        return _response(404, {"error": "Route not found"})
     try:
-        return funcion(event)
-    except ErrorCliente as e:
-        return _respuesta(e.status, e.cuerpo)
+        return func(event)
+    except ClientRequestError as e:
+        return _response(e.status, e.body)
     except RuntimeError as e:
-        return _respuesta(502, {"error": str(e)})
+        return _response(502, {"error": str(e)})
     except Exception:
         logger.exception("Error inesperado en %s %s", event.get("httpMethod"), event.get("path"))
-        return _respuesta(500, {"error": "Error interno del servidor"})
+        return _response(500, {"error": "Internal server error"})

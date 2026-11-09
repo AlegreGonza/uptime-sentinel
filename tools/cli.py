@@ -6,99 +6,110 @@ from rich.console import Console
 from rich.table import Table
 
 VERSION = "1.0.0"
-AYUDA_URL = "URL completa, con https://"
+AYUDA_URL = "Full URL, including https://"
 API_URL = os.environ.get("UPTIME_API_URL", "")
 API_KEY = os.environ.get("UPTIME_API_KEY", "")
 
-app = typer.Typer(help="Consulta el monitor de disponibilidad uptime-sentinel.", no_args_is_help=True)
-consola = Console()
-errores = Console(stderr=True)
+app = typer.Typer(help="Query the uptime-sentinel availability monitor.", no_args_is_help=True)
+console = Console()
+errors = Console(stderr=True)
 
 
-def _mostrar_version(valor: bool):
-    if valor:
+def _show_version(value: bool):
+    if value:
         typer.echo(f"uptime {VERSION}")
         raise typer.Exit()
 
 
 @app.callback()
-def principal(
-    version: bool = typer.Option(False, "--version", callback=_mostrar_version, is_eager=True, help="Muestra la versión"),
+def root(
+    version: bool = typer.Option(False, "--version", callback=_show_version, is_eager=True, help="Show the version"),
 ):
     pass
 
 
-def _pedir(metodo, ruta, cuerpo=None, params=None):
+def _request(method, route, body=None, params=None):
     if not API_URL or not API_KEY:
-        errores.print("[red]Faltan las variables UPTIME_API_URL y UPTIME_API_KEY[/]")
+        errors.print("[red]UPTIME_API_URL and UPTIME_API_KEY are missing[/]")
         raise typer.Exit(2)
     try:
-        respuesta = httpx.request(
-            metodo,
-            API_URL.rstrip("/") + ruta,
-            json=cuerpo,
+        response = httpx.request(
+            method,
+            API_URL.rstrip("/") + route,
+            json=body,
             params=params,
             headers={"x-api-key": API_KEY},
             timeout=30,
         )
     except httpx.HTTPError as error:
-        errores.print(f"[red]No se pudo conectar con la API:[/] {error}")
+        errors.print(f"[red]Could not reach the API:[/] {error}")
         raise typer.Exit(1)
     try:
-        cuerpo = respuesta.json()
+        body = response.json()
     except ValueError:
-        errores.print(f"[red]La API respondió algo que no es JSON (código {respuesta.status_code})[/]")
+        errors.print(f"[red]The API returned something that is not JSON (status {response.status_code})[/]")
         raise typer.Exit(1)
-    return respuesta.status_code, cuerpo
+    return response.status_code, body
 
 
-def _datos(status, cuerpo):
+def _data(status, body):
     if status >= 400:
-        mensaje = cuerpo.get("error") or cuerpo.get("message", "respuesta inesperada")
-        errores.print(f"[red]Error {status}:[/] {mensaje}")
+        message = "unexpected response"
+        if isinstance(body, dict):
+            message = body.get("error") or body.get("message", message)
+        errors.print(f"[red]Error {status}:[/] {message}")
         raise typer.Exit(1)
-    return cuerpo
+    return body
 
 
-@app.command(help="Revisa una URL sin guardarla")
-def probar(url: str = typer.Argument(..., help=AYUDA_URL)):
-    datos = _datos(*_pedir("POST", "/probar", {"url": url}))
-    tabla = Table(title="Resultado", show_header=False)
-    for clave, valor in datos.items():
-        tabla.add_row(clave, str(valor))
-    consola.print(tabla)
+def _print_record(title, record):
+    table = Table(title=title, show_header=False)
+    for key, value in record.items():
+        table.add_row(key, str(value))
+    console.print(table)
 
 
-@app.command(help="Guarda una URL para monitorearla cada 5 minutos")
-def guardar(url: str = typer.Argument(..., help=AYUDA_URL)):
-    datos = _datos(*_pedir("POST", "/objetivos", {"url": url}))
-    tabla = Table(title="Objetivo guardado", show_header=False)
-    for clave, valor in datos.items():
-        tabla.add_row(clave, str(valor))
-    consola.print(tabla)
+@app.command(help="Check a URL without saving it")
+def probe(url: str = typer.Argument(..., help=AYUDA_URL)):
+    data = _data(*_request("POST", "/probe", {"url": url}))
+    _print_record("Result", data)
 
 
-@app.command(help="Muestra las URLs monitoreadas")
-def listar():
-    datos = _datos(*_pedir("GET", "/objetivos"))
-    tabla = Table("URL", "Creado", "Activo")
-    for objetivo in datos["objetivos"]:
-        tabla.add_row(objetivo["url"], objetivo.get("created_at", "-"), "sí" if objetivo.get("enabled") else "no")
-    consola.print(tabla)
+@app.command(help="Save a URL to monitor it every 5 minutes")
+def save(
+    url: str = typer.Argument(..., help=AYUDA_URL),
+    expected_status: int = typer.Option(
+        None, "--expected-status", help="Status code that counts as OK (default: any 2xx or 3xx)"
+    ),
+):
+    body = {"url": url}
+    if expected_status is not None:
+        body["expected_status"] = expected_status
+    data = _data(*_request("POST", "/targets", body))
+    _print_record("Saved target", data)
 
 
-@app.command(help="Muestra el historial de una URL")
-def resultados(url: str = typer.Argument(..., help=AYUDA_URL)):
-    datos = _datos(*_pedir("GET", "/resultados", params={"url": url}))
-    tabla = Table("Fecha", "Status", "ms", "Error")
-    for resultado in datos["resultados"]:
-        tabla.add_row(
-            resultado["timestamp"],
-            str(resultado["status_code"]),
-            str(resultado["elapsed_ms"]),
-            resultado.get("error") or "-",
+@app.command("list", help="Show the monitored URLs")
+def list_targets():
+    data = _data(*_request("GET", "/targets"))
+    table = Table("URL", "Created", "Enabled")
+    for target in data.get("targets", []):
+        table.add_row(target.get("url", "-"), target.get("created_at", "-"), "yes" if target.get("enabled") else "no")
+    console.print(table)
+
+
+@app.command(help="Show the history of a URL")
+def results(url: str = typer.Argument(..., help=AYUDA_URL)):
+    data = _data(*_request("GET", "/results", params={"url": url}))
+    table = Table("Date", "Status", "ms", "Error")
+    for result in data.get("results", []):
+        table.add_row(
+            str(result.get("timestamp", "-")),
+            str(result.get("status_code", "-")),
+            str(result.get("elapsed_ms", "-")),
+            result.get("error") or "-",
         )
-    consola.print(tabla)
+    console.print(table)
 
 
 if __name__ == "__main__":
