@@ -58,7 +58,7 @@ resource "aws_lambda_function" "api" {
   runtime          = "python3.13"
   filename         = data.archive_file.api.output_path
   source_code_hash = data.archive_file.api.output_base64sha256
-  timeout          = 20
+  timeout          = 27
   memory_size      = 128
 
   environment {
@@ -83,87 +83,87 @@ resource "aws_api_gateway_rest_api" "api" {
   }
 }
 
-resource "aws_api_gateway_resource" "probar" {
+resource "aws_api_gateway_resource" "probe" {
   rest_api_id = aws_api_gateway_rest_api.api.id
   parent_id   = aws_api_gateway_rest_api.api.root_resource_id
-  path_part   = "probar"
+  path_part   = "probe"
 }
 
-resource "aws_api_gateway_resource" "objetivos" {
+resource "aws_api_gateway_resource" "targets" {
   rest_api_id = aws_api_gateway_rest_api.api.id
   parent_id   = aws_api_gateway_rest_api.api.root_resource_id
-  path_part   = "objetivos"
+  path_part   = "targets"
 }
 
-resource "aws_api_gateway_resource" "resultados" {
+resource "aws_api_gateway_resource" "results" {
   rest_api_id = aws_api_gateway_rest_api.api.id
   parent_id   = aws_api_gateway_rest_api.api.root_resource_id
-  path_part   = "resultados"
+  path_part   = "results"
 }
 
-resource "aws_api_gateway_method" "probar_post" {
+resource "aws_api_gateway_method" "probe_post" {
   rest_api_id      = aws_api_gateway_rest_api.api.id
-  resource_id      = aws_api_gateway_resource.probar.id
+  resource_id      = aws_api_gateway_resource.probe.id
   http_method      = "POST"
   authorization    = "NONE"
   api_key_required = true
 }
 
-resource "aws_api_gateway_method" "objetivos_post" {
+resource "aws_api_gateway_method" "targets_post" {
   rest_api_id      = aws_api_gateway_rest_api.api.id
-  resource_id      = aws_api_gateway_resource.objetivos.id
+  resource_id      = aws_api_gateway_resource.targets.id
   http_method      = "POST"
   authorization    = "NONE"
   api_key_required = true
 }
 
-resource "aws_api_gateway_method" "objetivos_get" {
+resource "aws_api_gateway_method" "targets_get" {
   rest_api_id      = aws_api_gateway_rest_api.api.id
-  resource_id      = aws_api_gateway_resource.objetivos.id
+  resource_id      = aws_api_gateway_resource.targets.id
   http_method      = "GET"
   authorization    = "NONE"
   api_key_required = true
 }
 
-resource "aws_api_gateway_method" "resultados_get" {
+resource "aws_api_gateway_method" "results_get" {
   rest_api_id      = aws_api_gateway_rest_api.api.id
-  resource_id      = aws_api_gateway_resource.resultados.id
+  resource_id      = aws_api_gateway_resource.results.id
   http_method      = "GET"
   authorization    = "NONE"
   api_key_required = true
 }
 
-resource "aws_api_gateway_integration" "probar_post" {
+resource "aws_api_gateway_integration" "probe_post" {
   rest_api_id             = aws_api_gateway_rest_api.api.id
-  resource_id             = aws_api_gateway_resource.probar.id
-  http_method             = aws_api_gateway_method.probar_post.http_method
+  resource_id             = aws_api_gateway_resource.probe.id
+  http_method             = aws_api_gateway_method.probe_post.http_method
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
   uri                     = aws_lambda_function.api.invoke_arn
 }
 
-resource "aws_api_gateway_integration" "objetivos_post" {
+resource "aws_api_gateway_integration" "targets_post" {
   rest_api_id             = aws_api_gateway_rest_api.api.id
-  resource_id             = aws_api_gateway_resource.objetivos.id
-  http_method             = aws_api_gateway_method.objetivos_post.http_method
+  resource_id             = aws_api_gateway_resource.targets.id
+  http_method             = aws_api_gateway_method.targets_post.http_method
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
   uri                     = aws_lambda_function.api.invoke_arn
 }
 
-resource "aws_api_gateway_integration" "objetivos_get" {
+resource "aws_api_gateway_integration" "targets_get" {
   rest_api_id             = aws_api_gateway_rest_api.api.id
-  resource_id             = aws_api_gateway_resource.objetivos.id
-  http_method             = aws_api_gateway_method.objetivos_get.http_method
+  resource_id             = aws_api_gateway_resource.targets.id
+  http_method             = aws_api_gateway_method.targets_get.http_method
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
   uri                     = aws_lambda_function.api.invoke_arn
 }
 
-resource "aws_api_gateway_integration" "resultados_get" {
+resource "aws_api_gateway_integration" "results_get" {
   rest_api_id             = aws_api_gateway_rest_api.api.id
-  resource_id             = aws_api_gateway_resource.resultados.id
-  http_method             = aws_api_gateway_method.resultados_get.http_method
+  resource_id             = aws_api_gateway_resource.results.id
+  http_method             = aws_api_gateway_method.results_get.http_method
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
   uri                     = aws_lambda_function.api.invoke_arn
@@ -182,10 +182,10 @@ resource "aws_api_gateway_deployment" "api" {
 
   triggers = {
     redeploy = sha1(jsonencode([
-      aws_api_gateway_integration.probar_post.id,
-      aws_api_gateway_integration.objetivos_post.id,
-      aws_api_gateway_integration.objetivos_get.id,
-      aws_api_gateway_integration.resultados_get.id,
+      aws_api_gateway_integration.probe_post.id,
+      aws_api_gateway_integration.targets_post.id,
+      aws_api_gateway_integration.targets_get.id,
+      aws_api_gateway_integration.results_get.id,
       data.archive_file.api.output_base64sha256,
     ]))
   }
