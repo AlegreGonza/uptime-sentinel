@@ -34,15 +34,15 @@ The project is built to be small, auditable, and cheap. Every part has a single 
 
 ```mermaid
 flowchart LR
-    EB[EventBridge cada 5 min] --> M[Lambda monitor]
+    EB[EventBridge every 5 min] --> M[Lambda monitor]
     M --> C[Lambda checker]
-    C --> W[Sitio web]
+    C --> W[Website]
     M --> T[(DynamoDB targets)]
     M --> K[(DynamoDB checks)]
     M --> S[SNS uptime-alerts-dev]
     S --> E[Email]
-    CW[CloudWatch alarm silencio] -.-> M
-    U[CLI / cliente] --> A[API Gateway + API key]
+    CW[CloudWatch alarms] -.-> M
+    U[CLI / client] --> A[API Gateway + API key]
     A --> AP[Lambda api]
     AP --> T
     AP --> K
@@ -50,14 +50,14 @@ flowchart LR
 ```
 
 1. **EventBridge** triggers the monitor every 5 minutes.
-2. **The `monitor` Lambda** reads the active URLs from the `targets` table and invokes the checker for each one.
-3. **The `checker` Lambda** validates the URL, makes the HTTP request, and returns the result: status code, error if any, and response time.
+2. **The `monitor` Lambda** reads the enabled URLs from the `targets` table and invokes the checker for each one, up to 8 at a time.
+3. **The `checker` Lambda** validates the URL, makes the HTTPS request, and returns the result: status code, error if any, and timings for DNS, connection, TLS, and response.
 4. The monitor stores each result in the `checks` table, looks at the most recent checks, and publishes to **SNS** when the state changes. SNS delivers the email.
-5. **API Gateway and the `api` Lambda** expose four routes to save URLs, test a URL without saving it, list targets, and read the history. The CLI consumes that API.
+5. **API Gateway and the `api` Lambda** expose four routes to test a URL, save a URL, list targets, and read the history. The CLI consumes that API.
 
 ## Architecture
 
-![Architecture diagram](docs/architecture.png)
+![Architecture diagram](docs/architecture.jpg)
 
 | Component | Role | Can write |
 |---|---|---|
@@ -67,6 +67,7 @@ flowchart LR
 | `cli` | Consumes the API from the terminal | Nothing directly |
 | SNS topic `uptime-alerts-dev` | Delivers alerts to the subscribed email | Nothing |
 | CloudWatch alarm `uptime-monitor-silent-dev` | Fires if the monitor does not run for 15 minutes | Nothing |
+| CloudWatch alarm `uptime-monitor-errors-dev` | Fires if the monitor fails in a run | Nothing |
 
 Each component can only write what its role requires. The checker is read-only by design: it never touches the database.
 
@@ -74,14 +75,16 @@ Each component can only write what its role requires. The checker is read-only b
 
 | Method | Route | Description |
 |---|---|---|
-| POST | `/probar` | Checks a URL without saving it |
-| POST | `/objetivos` | Saves a URL to monitor |
-| GET | `/objetivos` | Lists saved targets |
-| GET | `/resultados?url=...` | Shows the history of a URL |
+| POST | `/probe` | Checks a URL without saving it |
+| POST | `/targets` | Saves a URL to monitor (optional `expected_status`) |
+| GET | `/targets` | Lists saved targets |
+| GET | `/results?url=...` | Shows the history of a URL |
+
+Every route requires the `x-api-key` header.
 
 ## Alert logic
 
-The monitor evaluates the last four checks of each URL after every run. A check fails if it has a connection error or if the HTTP status is not 200.
+After every run, the monitor looks at the last four checks of each URL. A check counts as a failure if it has an error, no status code, or a status that is not OK. By default, any 2xx or 3xx status is OK. If a target has `expected_status` set, only that exact status is OK.
 
 ```mermaid
 stateDiagram-v2
@@ -93,19 +96,22 @@ stateDiagram-v2
     RECUPERADO --> OK
 ```
 
-- **PRE-ALERTA**: the first failure.
-- **CAÍDA**: three consecutive failures.
-- **RECUPERADO**: the site responds again after having been down.
+- **PRE-ALERT**: the first failure.
+- **DOWN**: three consecutive failures. It fires once, on the third failure, and does not repeat on the fourth.
+- **RECOVERED**: the latest check is OK and the three before it failed.
+- **RISK**: a 0-100 risk index (in `src/risk.py`) that compares the last 4 checks with the baseline before them. It needs at least 24 checks per URL and alerts when it crosses 50.
 
-Alerts fire only on transitions, so a site that stays down does not flood your inbox. A separate alarm notifies you if the monitor itself stops running, which covers the case where the monitoring is the thing that broke.
+Alerts fire only on transitions, so a site that stays down does not flood your inbox. Two separate alarms notify you if the monitor itself stops running or fails, which covers the case where the monitoring is the thing that broke.
 
 ## Security
 
 The checker makes requests to URLs chosen by the user, which can be abused to reach internal services, such as the AWS metadata endpoint. It defends against that in several layers:
 
 - HTTPS only, port 443 only, and no credentials in the URL.
-- Resolves DNS and rejects non-public addresses, including IPv4-mapped, 6to4, NAT64, and Teredo forms.
+- Resolves DNS and rejects the URL if any resolved address is non-public, including IPv4-mapped, 6to4, NAT64, and Teredo forms.
 - Connects to the already validated IP, not the hostname, to prevent DNS changes between validation and connection.
+- Does not follow redirects. A 3xx response is reported as the status the site returned.
+- Errors returned to the client use fixed messages, without internal details.
 
 The API requires `x-api-key` on every route. A usage plan limits traffic to 5 requests per second, bursts of 10, and a quota of 1000 per day.
 
@@ -114,7 +120,7 @@ Each Lambda has only the permissions it needs:
 | Lambda | DynamoDB | Other |
 |---|---|---|
 | `monitor` | Scan targets, PutItem and Query checks | Publish to the alerts topic, invoke checker |
-| `api` | PutItem and Scan targets, Query checks | Invoke checker (for `/probar`) |
+| `api` | PutItem and Scan targets, Query checks | Invoke checker (for `/probe`) |
 | `checker` | None | None |
 
 ## Requirements
@@ -139,22 +145,23 @@ $env:UPTIME_API_URL = "<API URL>"
 $env:UPTIME_API_KEY = "<API key>"
 ```
 
-Get the URL from `terraform output api_url` in `infra/envs/dev`. Get the API key from the API Gateway console. It is never stored in the repository.
+Get the URL from `terraform output api_url` in `infra/envs/dev`. Get the API key from the API Gateway console or with `aws apigateway get-api-key --api-key <api_key_id> --include-value`. It is never stored in the repository.
 
 ```powershell
 python tools/cli.py --version
-python tools/cli.py probar https://example.com/
-python tools/cli.py guardar https://example.com/
-python tools/cli.py listar
-python tools/cli.py resultados https://example.com/
+python tools/cli.py probe https://example.com/
+python tools/cli.py save https://example.com/
+python tools/cli.py save https://example.com/status --expected-status 200
+python tools/cli.py list
+python tools/cli.py results https://example.com/
 ```
 
 | Command | What it does |
 |---|---|
-| `probar` | Checks the URL and shows the result without saving it |
-| `guardar` | Checks the URL and, if it is public, adds it to the targets |
-| `listar` | Lists the saved targets |
-| `resultados` | Shows the check history for a URL |
+| `probe` | Checks the URL and shows the result without saving it |
+| `save` | Checks the URL and, if it is public, adds it to the targets. `--expected-status` sets the only status that counts as OK |
+| `list` | Lists the saved targets |
+| `results` | Shows the check history for a URL |
 
 Exit codes: `0` on success, `1` if the API returned an error, `2` if configuration is missing or the command is invalid.
 
@@ -184,11 +191,11 @@ terraform destroy
 
 Unit tests, without touching AWS. They use mocks for boto3, sockets and HTTP, and cover:
 
-- **Checker**: non-public IP detection, URL rules, pinned connection.
-- **Monitor**: alert transitions, pagination, partial failures.
-- **API**: every route, every error code, no internal details leaked.
+- **Checker**: non-public IP detection, URL rules, pinned connection, total deadline, redirects, path encoding.
+- **Monitor**: alert transitions, pagination, partial failures, parallel invocations.
+- **API**: every route, every error code, `expected_status` validation, no internal details leaked.
 - **CLI**: every command and every error path.
-- **Risk index**: baseline, recovery, and edge cases.
+- **Risk index**: baseline, recovery, expected status, and edge cases.
 
 ```powershell
 pip install -r requirements-dev.txt
@@ -197,10 +204,14 @@ python -m pytest -v
 
 `tests/conftest.py` sets placeholder values for the environment variables the code reads at import time, so no AWS configuration is needed to run the unit tests.
 
-Integration tests against the deployed infrastructure, marked `integration` and excluded by default. They write real data to DynamoDB and call the live API, so run them on purpose:
+Integration tests run against the deployed infrastructure. They are marked `integration` and excluded by default. They write real data to DynamoDB, invoke the live Lambdas, and call the live API, so run them on purpose. Set the deployed names first:
 
 ```powershell
-python -m pytest -m integration -v
+$env:CHECKER_FUNCTION = "uptime-checker-dev"
+$env:MONITOR_FUNCTION = "uptime-monitor-dev"
+$env:TARGETS_TABLE = "uptime-targets-dev"
+$env:RESULTS_TABLE = "uptime-checks-dev"
+python -m pytest tests/integration -v -m integration
 ```
 
 ## Security scanning in CI
@@ -233,20 +244,21 @@ Checkov reports 38 findings. Each one is accepted for cost, design, or because i
 
 ## Design decisions and known limitations
 
-- **Redirects count as failures.** The checker does not follow redirects, so a site that answers with a 301 (for example, HTTP to HTTPS or a bare domain to `www`) is reported as down. Following redirects safely would mean re-running the full URL validation on every hop.
-- **Checks run in series.** The monitor invokes the checker for each URL one after another, with a 120-second timeout. With many targets, a run can be cut off before it finishes. Parallel invocations would fix this.
+- **Redirects are not followed.** The checker reports the status the site returns. A 3xx counts as up. Following redirects safely would mean re-running the full URL validation on every hop.
+- **Checks run in parallel, with a limit.** The monitor invokes the checker for up to 8 URLs at a time. Each check has a 15-second total deadline, and the checker Lambda has a 25-second timeout.
 - **Risk index needs history.** It is only calculated after 24 checks per URL, so it stays empty for new targets.
 - **Monitoring data is disposable.** DynamoDB does not use point-in-time recovery, and logs are kept for 14 days. This is intentional for a project of this size.
 - **No pipeline.** Deployment is manual with Terraform. There is no workflow that applies changes to AWS.
 
 ## Costs
 
-The whole project is designed to run on free-tier services. The monitor invokes the checker and writes to DynamoDB every 5 minutes, about 8,600 times a month, which is negligible. The silence alarm costs cents per month. Even so, the infrastructure is destroyed after each verification so nothing keeps running.
+The whole project is designed to run on free-tier services. The monitor invokes the checker and writes to DynamoDB every 5 minutes, about 8,600 times a month, which is negligible. The two alarms and the log groups cost cents per month at most. Lambda time, DynamoDB capacity (5 RCU and 5 WCU per table) and SNS emails stay within the always-free limits. The API Gateway free tier lasts 12 months, after which requests are billed per call. The infrastructure can be destroyed with `terraform destroy` when it is not in use, so nothing keeps running.
 
 ## Roadmap
 
 - [x] Checker, API, and monitor
-- [x] Alerts by SNS and silence alarm
+- [x] Alerts by SNS and silence and error alarms
+- [x] Parallel checks and `expected_status` per target
 - [x] Security scanning in CI with Gitleaks and Checkov
-- [x] `riesgo.py` with a baseline and a 0-100 risk index
+- [x] `src/risk.py` with a baseline and a 0-100 risk index
 - [x] Documented incident case
