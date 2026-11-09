@@ -10,7 +10,7 @@ resource "aws_sns_topic_subscription" "email" {
 
 resource "aws_cloudwatch_metric_alarm" "monitor_silent" {
   alarm_name          = "uptime-monitor-silent-dev"
-  alarm_description   = "El monitor no se ejecutó en 15 minutos"
+  alarm_description   = "The monitor did not run for 15 minutes"
   namespace           = "AWS/Lambda"
   metric_name         = "Invocations"
   dimensions          = { FunctionName = aws_lambda_function.monitor.function_name }
@@ -21,6 +21,21 @@ resource "aws_cloudwatch_metric_alarm" "monitor_silent" {
   threshold           = 1
   comparison_operator = "LessThanThreshold"
   treat_missing_data  = "breaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "monitor_errors" {
+  alarm_name          = "uptime-monitor-errors-dev"
+  alarm_description   = "The monitor failed in its last run"
+  namespace           = "AWS/Lambda"
+  metric_name         = "Errors"
+  dimensions          = { FunctionName = aws_lambda_function.monitor.function_name }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.alerts.arn]
 }
 

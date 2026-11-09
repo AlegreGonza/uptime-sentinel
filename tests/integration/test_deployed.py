@@ -19,15 +19,15 @@ pytestmark = pytest.mark.integration
 
 
 def _invocar(function, payload=None):
-    cliente = boto3.client("lambda", region_name=REGION)
+    client = boto3.client("lambda", region_name=REGION)
     try:
-        cliente.get_function(FunctionName=function)
+        client.get_function(FunctionName=function)
     except ClientError:
-        pytest.skip(f"{function} no está desplegada")
-    respuesta = cliente.invoke(FunctionName=function, Payload=json.dumps(payload or {}).encode())
-    cuerpo = json.loads(respuesta["Payload"].read())
-    assert respuesta.get("FunctionError") is None, cuerpo
-    return cuerpo
+        pytest.skip(f"{function} is not deployed")
+    response = client.invoke(FunctionName=function, Payload=json.dumps(payload or {}).encode())
+    body = json.loads(response["Payload"].read())
+    assert response.get("FunctionError") is None, body
+    return body
 
 
 @pytest.mark.parametrize("url", [
@@ -38,9 +38,9 @@ def _invocar(function, payload=None):
     "https://localhost/",
 ])
 def test_checker_rechaza_destinos_internos(url):
-    cuerpo = _invocar(CHECKER, {"url": url})
-    assert cuerpo["rechazado"] is True
-    assert cuerpo["status_code"] == 400
+    body = _invocar(CHECKER, {"url": url})
+    assert body["rejected"] is True
+    assert body["status_code"] == 400
 
 
 @pytest.mark.parametrize("url", [
@@ -50,24 +50,24 @@ def test_checker_rechaza_destinos_internos(url):
     "https://example.com:8443/",
 ])
 def test_checker_rechaza_esquemas_y_puertos_no_permitidos(url):
-    cuerpo = _invocar(CHECKER, {"url": url})
-    assert cuerpo["rechazado"] is True
+    body = _invocar(CHECKER, {"url": url})
+    assert body["rejected"] is True
 
 
 @pytest.mark.parametrize("payload", [{}, {"url": None}, {"url": 123}])
 def test_checker_rechaza_payload_malformado(payload):
-    cuerpo = _invocar(CHECKER, payload)
-    assert cuerpo["rechazado"] is True
+    body = _invocar(CHECKER, payload)
+    assert body["rejected"] is True
 
 
-def test_checker_revisa_un_sitio_publico():
-    cuerpo = _invocar(CHECKER, {"url": "https://example.com/"})
-    assert cuerpo["error"] is None
-    assert cuerpo["status_code"] == 200
-    assert set(cuerpo) == REGISTRO
+def test_checker_checks_a_public_site():
+    body = _invocar(CHECKER, {"url": "https://example.com/"})
+    assert body["error"] is None
+    assert body["status_code"] == 200
+    assert REGISTRO <= set(body)
 
 
-def test_monitor_corre_sin_fallos():
+def test_monitor_runs_without_failures():
     resumen = _invocar(MONITOR)
     assert resumen["failed"] == 0
     assert resumen["checked"] >= 1
@@ -75,18 +75,18 @@ def test_monitor_corre_sin_fallos():
 
 def test_monitor_guarda_el_resultado():
     _invocar(MONITOR)
-    tabla = boto3.resource("dynamodb", region_name=REGION).Table(CHECKS_TABLE)
-    respuesta = tabla.query(
+    table = boto3.resource("dynamodb", region_name=REGION).Table(CHECKS_TABLE)
+    response = table.query(
         KeyConditionExpression=Key("url").eq("https://example.com/"),
         ScanIndexForward=False,
         Limit=1,
     )
-    assert respuesta["Count"] >= 1
-    assert REGISTRO <= set(respuesta["Items"][0])
+    assert response["Count"] >= 1
+    assert REGISTRO <= set(response["Items"][0])
 
 
-def _url(ruta):
-    return API_URL.rstrip("/") + ruta
+def _url(route):
+    return API_URL.rstrip("/") + route
 
 
 def _requiere_api():
@@ -97,43 +97,43 @@ def _requiere_api():
 @pytest.fixture
 def api():
     _requiere_api()
-    with httpx.Client(headers={"x-api-key": API_KEY}, timeout=30) as cliente:
-        yield cliente
+    with httpx.Client(headers={"x-api-key": API_KEY}, timeout=30) as client:
+        yield client
 
 
-def test_api_sin_key_responde_403():
+def test_api_without_key_returns_403():
     _requiere_api()
-    assert httpx.get(_url("/objetivos"), timeout=30).status_code == 403
+    assert httpx.get(_url("/targets"), timeout=30).status_code == 403
 
 
-def test_api_listar_con_key(api):
-    respuesta = api.get(_url("/objetivos"))
-    assert respuesta.status_code == 200
-    assert "objetivos" in respuesta.json()
+def test_api_list_con_key(api):
+    response = api.get(_url("/targets"))
+    assert response.status_code == 200
+    assert "targets" in response.json()
 
 
-def test_api_probar_sitio_publico(api):
-    respuesta = api.post(_url("/probar"), json={"url": "https://example.com/"})
-    assert respuesta.status_code == 200
-    assert respuesta.json()["status_code"] == 200
+def test_api_probe_sitio_publico(api):
+    response = api.post(_url("/probe"), json={"url": "https://example.com/"})
+    assert response.status_code == 200
+    assert response.json()["status_code"] == 200
 
 
-def test_api_probar_rechaza_ip_interna(api):
-    respuesta = api.post(_url("/probar"), json={"url": "https://169.254.169.254/"})
-    assert respuesta.status_code == 400
-    assert respuesta.json()["rechazado"] is True
+def test_api_probe_rechaza_ip_interna(api):
+    response = api.post(_url("/probe"), json={"url": "https://169.254.169.254/"})
+    assert response.status_code == 400
+    assert response.json()["rejected"] is True
 
 
-def test_api_guardar_repetida_da_409(api):
-    respuesta = api.post(_url("/objetivos"), json={"url": "https://example.com/"})
-    assert respuesta.status_code == 409
+def test_api_save_repetida_da_409(api):
+    response = api.post(_url("/targets"), json={"url": "https://example.com/"})
+    assert response.status_code == 409
 
 
-def test_api_resultados_sin_url_da_400(api):
-    assert api.get(_url("/resultados")).status_code == 400
+def test_api_results_without_url_returns_400(api):
+    assert api.get(_url("/results")).status_code == 400
 
 
-def test_api_resultados_devuelve_historial(api):
-    respuesta = api.get(_url("/resultados"), params={"url": "https://example.com/"})
-    assert respuesta.status_code == 200
-    assert "resultados" in respuesta.json()
+def test_api_results_returns_history(api):
+    response = api.get(_url("/results"), params={"url": "https://example.com/"})
+    assert response.status_code == 200
+    assert "results" in response.json()

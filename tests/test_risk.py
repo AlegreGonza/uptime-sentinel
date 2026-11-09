@@ -2,8 +2,15 @@ from decimal import Decimal
 
 import pytest
 
-import riesgo
-from riesgo import MIN_BASELINE, RECENT_WINDOW, VENTANA_RIESGO, _checks_for, _urls, risk_index
+import risk
+from risk import (
+    MIN_BASELINE,
+    RECENT_WINDOW,
+    RISK_WINDOW,
+    _checks_for,
+    _urls,
+    risk_index,
+)
 
 MIN_CHECKS = MIN_BASELINE + RECENT_WINDOW
 
@@ -13,7 +20,7 @@ def make_checks(statuses):
         {
             "timestamp": f"2026-10-27T00:{i:02d}:00Z",
             "status_code": status,
-            "error": None if status == 200 else "fallo",
+            "error": None if status == 200 else "failure",
         }
         for i, status in enumerate(statuses)
     ]
@@ -108,11 +115,17 @@ def test_scan_follows_all_pages_for_targets():
     assert table.calls[1]["ExclusiveStartKey"] == {"url": "https://a.example/"}
 
 
+def test_scan_only_asks_for_enabled_targets():
+    table = PagedTable([{"Items": []}])
+    _urls(table)
+    assert "FilterExpression" in table.calls[0]
+
+
 def test_query_reads_only_the_recent_window_oldest_first():
     table = PagedTable([{"Items": make_checks([500, 200])[::-1]}])
     items = _checks_for(table, "https://a.example/")
     assert table.calls[0]["ScanIndexForward"] is False
-    assert table.calls[0]["Limit"] == VENTANA_RIESGO
+    assert table.calls[0]["Limit"] == RISK_WINDOW
     assert [c["timestamp"] for c in items] == sorted(c["timestamp"] for c in items)
 
 
@@ -130,12 +143,12 @@ def test_main_reports_each_target(monkeypatch, capsys):
         def Table(self, name):
             return tables[name]
 
-    monkeypatch.setattr(riesgo.boto3, "resource", lambda service: FakeDynamo())
+    monkeypatch.setattr(risk.boto3, "resource", lambda service: FakeDynamo())
     monkeypatch.setenv("TARGETS_TABLE", "targets")
     monkeypatch.setenv("RESULTS_TABLE", "checks")
 
-    riesgo.main()
+    risk.main()
 
     out = capsys.readouterr().out
-    assert "https://a.example/: riesgo 100" in out
-    assert "https://b.example/: sin datos suficientes" in out
+    assert "https://a.example/: risk 100" in out
+    assert "https://b.example/: not enough data" in out

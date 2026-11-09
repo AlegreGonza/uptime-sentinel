@@ -1,13 +1,16 @@
 import json
 import logging
 import os
+from collections import Counter
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from itertools import takewhile
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
 
-from riesgo import VENTANA_RIESGO, risk_index
+from risk import RISK_WINDOW, is_failure, risk_index
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -20,143 +23,176 @@ ALERTS_TOPIC = os.environ["ALERTS_TOPIC"]
 DYNAMODB = boto3.resource("dynamodb")
 LAMBDA = boto3.client("lambda")
 SNS = boto3.client("sns")
-TABLA_OBJETIVOS = DYNAMODB.Table(TARGETS_TABLE)
-TABLA_RESULTADOS = DYNAMODB.Table(RESULTS_TABLE)
+TARGETS_DB = DYNAMODB.Table(TARGETS_TABLE)
+CHECKS_DB = DYNAMODB.Table(RESULTS_TABLE)
 REQUIRED_FIELDS = ("url", "timestamp", "status_code", "error", "elapsed_ms")
-UMBRAL_CAIDA = 3
-CANTIDAD_HISTORIAL = UMBRAL_CAIDA + 1
-UMBRAL_RIESGO = 50
-CANTIDAD_HISTORIAL_RIESGO = VENTANA_RIESGO
+DOWN_THRESHOLD = 3
+HISTORY_SIZE = DOWN_THRESHOLD + 1
+RISK_THRESHOLD = 50
+RISK_HISTORY_SIZE = RISK_WINDOW + 1  # one extra check for the previous index
+MAX_WORKERS = 8  # concurrent checker invocations
+REASON_NO_RESPONSE = "The checker did not respond"
+REASON_REJECTED = "URL rejected by the checker"
+REASON_INVALID_RESPONSE = "The checker returned an invalid response"
 
 
-def _paginar(consulta: Callable, **kwargs) -> Iterator[dict]:
-    """Recorre todas las páginas de scan() o query() de DynamoDB."""
+def _paginate(operation: Callable, **kwargs) -> Iterator[dict]:
+    """Yields every page of a DynamoDB scan() or query()."""
     while True:
-        pagina = consulta(**kwargs)
-        yield from pagina.get("Items", [])
-        if "LastEvaluatedKey" not in pagina:
+        page = operation(**kwargs)
+        yield from page.get("Items", [])
+        if "LastEvaluatedKey" not in page:
             return
-        kwargs["ExclusiveStartKey"] = pagina["LastEvaluatedKey"]
+        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
 
 
-def _ejecutar_paso(nombre: str, url: str, funcion: Callable, *args):
-    """Ejecuta un paso del chequeo; si falla, lo registra y devuelve None."""
+def _run_step(step: str, url: str, func: Callable, *args):
+    """Runs one check step; if it fails, logs it and returns None."""
     try:
-        return funcion(*args)
+        return func(*args)
     except Exception:
-        logger.exception("Falló %s para %s", nombre, url)
+        logger.exception("Failed %s for %s", step, url)
         return None
 
 
-def _publicar(sns_client, asunto: str, mensaje: str) -> None:
-    sns_client.publish(TopicArn=ALERTS_TOPIC, Subject=asunto, Message=mensaje)
+def _publish(sns_client, subject: str, message: str) -> None:
+    sns_client.publish(TopicArn=ALERTS_TOPIC, Subject=subject, Message=message)
 
 
-def _objetivos_habilitados(tabla):
-    for item in _paginar(tabla.scan, FilterExpression=Attr("enabled").eq(True)):
-        url = item.get("url")
-        if url:
-            yield url
+def _enabled_targets(table):
+    for item in _paginate(table.scan, FilterExpression=Attr("enabled").eq(True)):
+        if item.get("url"):
+            yield item
         else:
-            logger.warning("Objetivo sin url: %s", item)
+            logger.warning("Target without url: %s", item)
 
 
-def _invocar_checker(lambda_client, url):
-    respuesta = lambda_client.invoke(
+def _invoke_checker(lambda_client, url):
+    response = lambda_client.invoke(
         FunctionName=CHECKER_FUNCTION,
         Payload=json.dumps({"url": url}),
     )
-    cuerpo = json.loads(respuesta["Payload"].read())
-    if respuesta.get("FunctionError"):
-        raise RuntimeError(f"El checker falló: {cuerpo}")
-    return cuerpo
+    body = json.loads(response["Payload"].read())
+    if response.get("FunctionError"):
+        raise RuntimeError(f"The checker failed: {body}")
+    return body
 
 
-def _validar_registro(registro):
-    faltan = [campo for campo in REQUIRED_FIELDS if campo not in registro]
-    if faltan:
-        raise ValueError(f"Respuesta del checker incompleta, faltan: {faltan}")
+def _invoke_safely(lambda_client, url):
+    """Returns (result, None) or (None, reason). Safe to run in a worker thread."""
+    try:
+        return _invoke_checker(lambda_client, url), None
+    except Exception:
+        logger.exception("The checker did not respond for %s", url)
+        return None, REASON_NO_RESPONSE
 
 
-def _revisar_objetivo(lambda_client, tabla_resultados, url):
-    resultado = _invocar_checker(lambda_client, url)
-    if resultado.get("rechazado"):
-        return "rechazado"
-    _validar_registro(resultado)
-    tabla_resultados.put_item(Item=resultado)
-    return "revisado"
+def _record_failure(checks_db, url, reason):
+    """Stores a failed check so the history reflects the outage."""
+    checks_db.put_item(Item={
+        "url": url,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "status_code": 0,
+        "error": reason,
+        "elapsed_ms": 0,
+    })
 
 
-def _ultimos_chequeos(tabla_resultados, url, cantidad):
-    """Devuelve los chequeos más recientes primero.
+def _bad_reason(result):
+    if result.get("rejected"):
+        return REASON_REJECTED
+    if [f for f in REQUIRED_FIELDS if f not in result]:
+        return REASON_INVALID_RESPONSE
+    return None
 
-    Una sola consulta con Limit: sin filtros, DynamoDB devuelve hasta `cantidad`
-    ítems y no hace falta paginar. Paginar acá traía todo el historial.
+
+def _store_check(checks_db, url, result, error):
+    """Saves a valid check, or records the failure. Runs on the main thread only."""
+    reason = error or _bad_reason(result)
+    if reason is None:
+        checks_db.put_item(Item=result)
+        return "checked"
+    logger.warning("Check failed for %s: %s", url, reason)
+    _record_failure(checks_db, url, reason)
+    return "rejected" if reason == REASON_REJECTED else "failed"
+
+
+def _recent_checks(checks_db, url, count):
+    """Returns the most recent checks first.
+
+    A single query with Limit: without filters, DynamoDB returns up to `count`
+    items, so pagination is not needed. Paginating here loaded the whole history.
     """
-    respuesta = tabla_resultados.query(
+    response = checks_db.query(
         KeyConditionExpression=Key("url").eq(url),
         ScanIndexForward=False,
-        Limit=cantidad,
+        Limit=count,
         ConsistentRead=True,
     )
-    return list(respuesta.get("Items", []))[:cantidad]
+    return list(response.get("Items", []))[:count]
 
 
-def _fallo(registro):
-    return registro.get("error") is not None or registro.get("status_code") != 200
+def _alert_type(failures):
+    if len(failures) == HISTORY_SIZE and not failures[0] and all(failures[1:]):
+        return "RECOVERED"
+    streak = len(list(takewhile(bool, failures)))
+    return {1: "PRE-ALERT", DOWN_THRESHOLD: "DOWN"}.get(streak)
 
 
-def _tipo_alerta(fallos):
-    if len(fallos) == CANTIDAD_HISTORIAL and not fallos[0] and all(fallos[1:]):
-        return "RECUPERADO"
-    consecutivos = len(list(takewhile(bool, fallos)))
-    return {1: "PRE-ALERTA", UMBRAL_CAIDA: "CAÍDA"}.get(consecutivos)
-
-
-def _mensaje_alerta(tipo, url):
-    mensajes = {
-        "PRE-ALERTA": f"{url} falló en el último chequeo. Si falla {UMBRAL_CAIDA} veces seguidas, se envía alerta de caída.",
-        "CAÍDA": f"{url} falló {UMBRAL_CAIDA} chequeos seguidos.",
-        "RECUPERADO": f"{url} volvió a responder correctamente.",
+def _alert_message(kind, url):
+    messages = {
+        "PRE-ALERT": (
+            f"{url} failed the last check. "
+            f"If it fails {DOWN_THRESHOLD} times in a row, a down alert is sent."
+        ),
+        "DOWN": f"{url} failed {DOWN_THRESHOLD} checks in a row.",
+        "RECOVERED": f"{url} is responding again.",
     }
-    return mensajes[tipo]
+    return messages[kind]
 
 
-def _evaluar_alertas(sns_client, tabla_resultados, url):
-    chequeos = _ultimos_chequeos(tabla_resultados, url, CANTIDAD_HISTORIAL)
-    tipo = _tipo_alerta([_fallo(c) for c in chequeos])
-    if tipo:
-        _publicar(sns_client, f"{tipo} uptime", _mensaje_alerta(tipo, url))
+def _evaluate_alerts(sns_client, history, url, expected_status=None):
+    checks = history[:HISTORY_SIZE]
+    kind = _alert_type([is_failure(c, expected_status) for c in checks])
+    if kind:
+        _publish(sns_client, f"{kind} uptime", _alert_message(kind, url))
 
 
-def _evaluar_riesgo(sns_client, tabla_resultados, url):
-    historial = _ultimos_chequeos(tabla_resultados, url, CANTIDAD_HISTORIAL_RIESGO)
-    actual = risk_index(historial)
-    anterior = risk_index(historial[1:])
-    cruzo_umbral = (
-        actual is not None
-        and anterior is not None
-        and anterior["index"] < UMBRAL_RIESGO <= actual["index"]
+def _evaluate_risk(sns_client, history, url, expected_status=None):
+    current = risk_index(history[:RISK_WINDOW], expected_status)
+    previous = risk_index(history[1:RISK_WINDOW + 1], expected_status)
+    crossed_threshold = (
+        current is not None
+        and previous is not None
+        and previous["index"] < RISK_THRESHOLD <= current["index"]
     )
-    if cruzo_umbral:
-        _publicar(
+    if crossed_threshold:
+        _publish(
             sns_client,
-            "RIESGO uptime",
-            f"{url} superó el índice de riesgo {UMBRAL_RIESGO}: ahora es {actual['index']}.",
+            "RISK uptime",
+            f"{url} exceeded the risk index {RISK_THRESHOLD}: it is now {current['index']}.",
         )
 
 
+def _evaluate(sns_client, checks_db, url, expected_status=None):
+    history = _recent_checks(checks_db, url, RISK_HISTORY_SIZE)
+    _run_step("alert evaluation", url, _evaluate_alerts, sns_client, history, url, expected_status)
+    _run_step("risk evaluation", url, _evaluate_risk, sns_client, history, url, expected_status)
+
+
 def handler(event, context):
-    checked = rejected = failed = 0
-    for url in _objetivos_habilitados(TABLA_OBJETIVOS):
-        estado = _ejecutar_paso("la revisión", url, _revisar_objetivo, LAMBDA, TABLA_RESULTADOS, url)
-        if estado is None:
-            failed += 1
+    targets = list(_enabled_targets(TARGETS_DB))
+    urls = [target["url"] for target in targets]
+    # Only the checker calls run in parallel; DynamoDB and SNS stay on this thread.
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        responses = list(pool.map(lambda url: _invoke_safely(LAMBDA, url), urls))
+    counts = Counter()
+    for target, (result, error) in zip(targets, responses):
+        url = target["url"]
+        state = _run_step("the check", url, _store_check, CHECKS_DB, url, result, error)
+        if state is None:
+            counts["failed"] += 1
             continue
-        if estado == "rechazado":
-            rejected += 1
-            continue
-        checked += 1
-        _ejecutar_paso("la evaluación de alertas", url, _evaluar_alertas, SNS, TABLA_RESULTADOS, url)
-        _ejecutar_paso("la evaluación de riesgo", url, _evaluar_riesgo, SNS, TABLA_RESULTADOS, url)
-    return {"checked": checked, "rejected": rejected, "failed": failed}
+        counts[state] += 1
+        _run_step("evaluation", url, _evaluate, SNS, CHECKS_DB, url, target.get("expected_status"))
+    return {key: counts[key] for key in ("checked", "rejected", "failed")}

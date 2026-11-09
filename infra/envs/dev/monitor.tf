@@ -49,8 +49,8 @@ data "archive_file" "monitor" {
   }
 
   source {
-    content  = file("${path.module}/../../../src/riesgo.py")
-    filename = "riesgo.py"
+    content  = file("${path.module}/../../../src/risk.py")
+    filename = "risk.py"
   }
 }
 
@@ -61,7 +61,8 @@ resource "aws_lambda_function" "monitor" {
   runtime          = "python3.13"
   filename         = data.archive_file.monitor.output_path
   source_code_hash = data.archive_file.monitor.output_base64sha256
-  timeout          = 120
+  timeout          = 240
+  memory_size      = 128
 
   environment {
     variables = {

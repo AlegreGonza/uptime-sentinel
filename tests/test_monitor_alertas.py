@@ -12,7 +12,7 @@ URL = "https://a.com/"
 
 
 class TablaFalsa:
-    """Imita query() de DynamoDB: respeta Limit y devuelve LastEvaluatedKey."""
+    """Mimics DynamoDB query(): honors Limit and returns LastEvaluatedKey."""
 
     def __init__(self, chequeos_mas_recientes_primero):
         self.items = chequeos_mas_recientes_primero
@@ -36,49 +36,49 @@ def _chequeo(ts, ok):
     }
 
 
-def test_ultimos_chequeos_devuelve_solo_la_cantidad_pedida():
-    tabla = TablaFalsa([_chequeo(f"t{i:02d}", True) for i in range(10, 0, -1)])
-    chequeos = monitor._ultimos_chequeos(tabla, URL, 4)
-    assert len(chequeos) == 4
-    assert chequeos[0]["timestamp"] == "t10"
+def test_recent_checks_returns_only_the_requested_count():
+    table = TablaFalsa([_chequeo(f"t{i:02d}", True) for i in range(10, 0, -1)])
+    checks = monitor._recent_checks(table, URL, 4)
+    assert len(checks) == 4
+    assert checks[0]["timestamp"] == "t10"
 
 
-def test_recuperado_se_dispara_con_historial_mayor_a_cuatro():
-    # Más reciente OK, luego tres fallos: hubo caída y ya se recuperó.
-    historial = [_chequeo("t10", True)] + [_chequeo(f"t{i:02d}", False) for i in range(9, 5, -1)]
-    historial += [_chequeo(f"t{i:02d}", True) for i in range(5, 0, -1)]
-    tabla = TablaFalsa(historial)
+def test_recovered_fires_with_history_longer_than_four():
+    # Newest OK, then three failures: there was an outage and it recovered.
+    history = [_chequeo("t10", True)] + [_chequeo(f"t{i:02d}", False) for i in range(9, 5, -1)]
+    history += [_chequeo(f"t{i:02d}", True) for i in range(5, 0, -1)]
+    table = TablaFalsa(history)
     sns = MagicMock()
-    monitor._evaluar_alertas(sns, tabla, URL)
+    monitor._evaluate_alerts(sns, monitor._recent_checks(table, URL, monitor.RISK_HISTORY_SIZE), URL)
     sns.publish.assert_called_once()
-    assert sns.publish.call_args.kwargs["Subject"] == "RECUPERADO uptime"
+    assert sns.publish.call_args.kwargs["Subject"] == "RECOVERED uptime"
 
 
-def test_caida_se_dispara_exactamente_al_tercer_fallo_seguido():
-    # Tres fallos recientes, luego OK: la CAÍDA se envía una sola vez.
-    historial = [_chequeo(f"t{i:02d}", False) for i in range(10, 7, -1)]
-    historial += [_chequeo(f"t{i:02d}", True) for i in range(7, 0, -1)]
+def test_down_fires_exactly_on_the_third_consecutive_failure():
+    # Three recent failures then OK: the DOWN alert is sent only once.
+    history = [_chequeo(f"t{i:02d}", False) for i in range(10, 7, -1)]
+    history += [_chequeo(f"t{i:02d}", True) for i in range(7, 0, -1)]
     sns = MagicMock()
-    monitor._evaluar_alertas(sns, TablaFalsa(historial), URL)
-    assert sns.publish.call_args.kwargs["Subject"] == "CAÍDA uptime"
+    monitor._evaluate_alerts(sns, monitor._recent_checks(TablaFalsa(history), URL, monitor.RISK_HISTORY_SIZE), URL)
+    assert sns.publish.call_args.kwargs["Subject"] == "DOWN uptime"
 
 
-def test_no_repite_caida_con_cuatro_fallos_seguidos():
-    historial = [_chequeo(f"t{i:02d}", False) for i in range(10, 0, -1)]
+def test_does_not_repeat_down_with_four_failures():
+    history = [_chequeo(f"t{i:02d}", False) for i in range(10, 0, -1)]
     sns = MagicMock()
-    monitor._evaluar_alertas(sns, TablaFalsa(historial), URL)
+    monitor._evaluate_alerts(sns, monitor._recent_checks(TablaFalsa(history), URL, monitor.RISK_HISTORY_SIZE), URL)
     sns.publish.assert_not_called()
 
 
-def test_pre_alerta_con_un_solo_fallo_reciente():
-    historial = [_chequeo("t10", False)] + [_chequeo(f"t{i:02d}", True) for i in range(9, 0, -1)]
+def test_pre_alert_with_a_single_recent_failure():
+    history = [_chequeo("t10", False)] + [_chequeo(f"t{i:02d}", True) for i in range(9, 0, -1)]
     sns = MagicMock()
-    monitor._evaluar_alertas(sns, TablaFalsa(historial), URL)
-    assert sns.publish.call_args.kwargs["Subject"] == "PRE-ALERTA uptime"
+    monitor._evaluate_alerts(sns, monitor._recent_checks(TablaFalsa(history), URL, monitor.RISK_HISTORY_SIZE), URL)
+    assert sns.publish.call_args.kwargs["Subject"] == "PRE-ALERT uptime"
 
 
-def test_sin_alerta_si_todo_responde():
-    historial = [_chequeo(f"t{i:02d}", True) for i in range(10, 0, -1)]
+def test_no_alert_when_everything_responds():
+    history = [_chequeo(f"t{i:02d}", True) for i in range(10, 0, -1)]
     sns = MagicMock()
-    monitor._evaluar_alertas(sns, TablaFalsa(historial), URL)
+    monitor._evaluate_alerts(sns, monitor._recent_checks(TablaFalsa(history), URL, monitor.RISK_HISTORY_SIZE), URL)
     sns.publish.assert_not_called()
