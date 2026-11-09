@@ -57,7 +57,7 @@ flowchart LR
 
 ## Architecture
 
-![Architecture diagram](docs/architecture.png)
+![Architecture diagram](docs/architecture.jpg)
 
 | Component | Role | Can write |
 |---|---|---|
